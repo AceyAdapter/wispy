@@ -1,0 +1,6 @@
+pynput
+sounddevice
+numpy
+scipy
+mlx-whisper
+pyperclip

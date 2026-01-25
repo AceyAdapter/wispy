@@ -34,13 +34,9 @@ from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 import streaming
 from streaming import StreamingTranscriber
 
-# macOS Accessibility check using PyObjC
-try:
-    from ApplicationServices import AXIsProcessTrustedWithOptions
-    from CoreFoundation import kCFBooleanTrue
-    HAS_ACCESSIBILITY_API = True
-except ImportError:
-    HAS_ACCESSIBILITY_API = False
+# macOS Accessibility check using ctypes (no extra dependencies)
+import ctypes
+import ctypes.util
 
 
 def check_accessibility_permissions():
@@ -49,26 +45,65 @@ def check_accessibility_permissions():
     If not, prompt the user and open System Settings.
     Returns True if permissions are granted, False otherwise.
     """
-    if not HAS_ACCESSIBILITY_API:
-        # Can't check, assume it's fine (will fail later if not)
-        return True
+    try:
+        # Load the ApplicationServices framework
+        app_services = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library("ApplicationServices")
+        )
+        core_foundation = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library("CoreFoundation")
+        )
 
-    # Check with prompt option - this will show the system prompt if not trusted
-    options = {
-        "AXTrustedCheckOptionPrompt": kCFBooleanTrue
-    }
-    trusted = AXIsProcessTrustedWithOptions(options)
+        # Get kCFBooleanTrue
+        core_foundation.CFRetain.argtypes = [ctypes.c_void_p]
+        core_foundation.CFRetain.restype = ctypes.c_void_p
+        kCFBooleanTrue = ctypes.c_void_p.in_dll(core_foundation, "kCFBooleanTrue")
 
-    if not trusted:
-        print("Accessibility permissions not granted.")
-        print("Please enable Wispy in System Settings > Privacy & Security > Accessibility")
-        # Open System Settings to Accessibility pane
-        subprocess.run([
-            "open",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        ], check=False)
+        # Create the options dictionary with prompt = true
+        core_foundation.CFDictionaryCreateMutable.argtypes = [
+            ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p
+        ]
+        core_foundation.CFDictionaryCreateMutable.restype = ctypes.c_void_p
 
-    return trusted
+        core_foundation.CFDictionarySetValue.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+        ]
+
+        # Create CFSTR for the key
+        core_foundation.CFStringCreateWithCString.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32
+        ]
+        core_foundation.CFStringCreateWithCString.restype = ctypes.c_void_p
+
+        kCFStringEncodingUTF8 = 0x08000100
+        key = core_foundation.CFStringCreateWithCString(
+            None, b"AXTrustedCheckOptionPrompt", kCFStringEncodingUTF8
+        )
+
+        # Create dictionary and set the prompt option
+        options = core_foundation.CFDictionaryCreateMutable(None, 1, None, None)
+        core_foundation.CFDictionarySetValue(options, key, kCFBooleanTrue)
+
+        # Call AXIsProcessTrustedWithOptions
+        app_services.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+        app_services.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+
+        trusted = app_services.AXIsProcessTrustedWithOptions(options)
+
+        # Clean up
+        core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+        core_foundation.CFRelease(options)
+        core_foundation.CFRelease(key)
+
+        if not trusted:
+            print("Accessibility permissions not granted.")
+            print("Please enable Wispy in System Settings > Privacy & Security > Accessibility")
+
+        return trusted
+
+    except Exception as e:
+        print(f"Could not check accessibility permissions: {e}")
+        return True  # Assume OK, will fail later if not
 
 
 # Single-instance lock file

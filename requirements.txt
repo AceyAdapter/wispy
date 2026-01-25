@@ -8,3 +8,5 @@ pyperclip
 rumps
 huggingface_hub
 webrtcvad
+pyobjc-framework-ApplicationServices
+pyobjc-framework-CoreFoundation

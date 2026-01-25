@@ -15,6 +15,7 @@ import time
 import signal
 import atexit
 import fcntl
+import subprocess
 from pathlib import Path
 from queue import Queue
 
@@ -32,6 +33,43 @@ from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 
 import streaming
 from streaming import StreamingTranscriber
+
+# macOS Accessibility check using PyObjC
+try:
+    from ApplicationServices import AXIsProcessTrustedWithOptions
+    from CoreFoundation import kCFBooleanTrue
+    HAS_ACCESSIBILITY_API = True
+except ImportError:
+    HAS_ACCESSIBILITY_API = False
+
+
+def check_accessibility_permissions():
+    """
+    Check if the app has Accessibility permissions.
+    If not, prompt the user and open System Settings.
+    Returns True if permissions are granted, False otherwise.
+    """
+    if not HAS_ACCESSIBILITY_API:
+        # Can't check, assume it's fine (will fail later if not)
+        return True
+
+    # Check with prompt option - this will show the system prompt if not trusted
+    options = {
+        "AXTrustedCheckOptionPrompt": kCFBooleanTrue
+    }
+    trusted = AXIsProcessTrustedWithOptions(options)
+
+    if not trusted:
+        print("Accessibility permissions not granted.")
+        print("Please enable Wispy in System Settings > Privacy & Security > Accessibility")
+        # Open System Settings to Accessibility pane
+        subprocess.run([
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ], check=False)
+
+    return trusted
+
 
 # Single-instance lock file
 LOCK_FILE = Path.home() / ".config" / "wispy" / "wispy.lock"
@@ -1011,8 +1049,15 @@ def main():
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    print("Note: You may need to grant Accessibility and Microphone permissions")
-    print("in System Settings > Privacy & Security")
+    # Check Accessibility permissions (required for paste simulation)
+    if not check_accessibility_permissions():
+        print()
+        print("⚠️  Accessibility permissions required for paste functionality.")
+        print("   After enabling, restart Wispy.")
+        print()
+
+    print("Note: You may also need to grant Microphone permissions")
+    print("in System Settings > Privacy & Security > Microphone")
     print()
     print("Starting menu bar app...")
 

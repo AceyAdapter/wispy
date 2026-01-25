@@ -22,6 +22,6 @@ venv/
 
 .claude
 
-build
-dist
-wispy.spec
+# Build artifacts (but keep spec and hook files)
+build/
+dist/

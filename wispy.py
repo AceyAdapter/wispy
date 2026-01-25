@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Wispy - Local voice-to-text tool using Whisper on Apple Silicon."""
 
+# CRITICAL: Must be at the very top before any other imports
+# Prevents fork bomb when bundled with PyInstaller on macOS
+import multiprocessing
+multiprocessing.freeze_support()
+
+import sys
 import tempfile
 import os
 import json
 import threading
 import time
+import signal
+import atexit
+import fcntl
 from pathlib import Path
 from queue import Queue
 
@@ -23,6 +32,10 @@ from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 
 import streaming
 from streaming import StreamingTranscriber
+
+# Single-instance lock file
+LOCK_FILE = Path.home() / ".config" / "wispy" / "wispy.lock"
+_lock_fd = None
 
 # Config file path
 CONFIG_PATH = Path.home() / ".config" / "wispy" / "config.json"
@@ -82,6 +95,10 @@ KEY_DISPLAY = {
 SAMPLE_RATE = 16000  # Whisper's native sample rate
 CHANNELS = 1
 
+# Safety limits to prevent memory exhaustion
+MAX_RECORDING_SECONDS = 300  # 5 minutes max recording
+MAX_RECORDING_SAMPLES = SAMPLE_RATE * MAX_RECORDING_SECONDS
+
 # Available engines
 ENGINES = ["whisper", "parakeet"]
 DEFAULT_ENGINE = "whisper"
@@ -138,6 +155,57 @@ def save_config(config):
             json.dump(config, f, indent=2)
     except Exception as e:
         print(f"Error saving config: {e}")
+
+
+def acquire_single_instance_lock():
+    """
+    Acquire a file lock to ensure only one instance runs.
+    Returns True if lock acquired, False if another instance is running.
+    """
+    global _lock_fd
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _lock_fd = open(LOCK_FILE, 'w')
+        fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fd.write(str(os.getpid()))
+        _lock_fd.flush()
+        return True
+    except (IOError, OSError):
+        if _lock_fd:
+            _lock_fd.close()
+            _lock_fd = None
+        return False
+
+
+def release_single_instance_lock():
+    """Release the single-instance file lock."""
+    global _lock_fd
+    if _lock_fd:
+        try:
+            fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_UN)
+            _lock_fd.close()
+        except Exception:
+            pass
+        _lock_fd = None
+
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# Global app reference for signal handlers
+_app_instance = None
+
+
+def _signal_handler(signum, frame):
+    """Handle termination signals for graceful shutdown."""
+    print(f"\nReceived signal {signum}, shutting down...")
+    if _app_instance:
+        _app_instance.cleanup()
+    release_single_instance_lock()
+    sys.exit(0)
 
 
 def key_matches(pressed_key, key_name):
@@ -671,6 +739,16 @@ class WispyApp(rumps.App):
         if status:
             print(f"Audio status: {status}")
         if self.recording:
+            # Check if we've exceeded max recording duration
+            current_samples = sum(len(chunk) for chunk in self.audio_chunks)
+            if current_samples >= MAX_RECORDING_SAMPLES:
+                # Auto-stop recording to prevent memory exhaustion
+                print("Warning: Max recording duration reached, auto-stopping")
+                self.recording = False
+                # Trigger processing in a thread
+                threading.Thread(target=self.process_recording, daemon=True).start()
+                return
+
             self.audio_chunks.append(indata.copy())
             # Feed to streaming transcriber if in streaming mode
             if self.streaming_mode and self.streaming_transcriber:
@@ -846,6 +924,46 @@ class WispyApp(rumps.App):
             pass
         return True
 
+    def cleanup(self):
+        """Clean up resources before shutdown."""
+        print("Cleaning up...")
+
+        # Stop any ongoing recording
+        if self.recording:
+            self.recording = False
+            if self.stream:
+                try:
+                    self.stream.stop()
+                    self.stream.close()
+                except Exception:
+                    pass
+                self.stream = None
+
+        # Stop streaming transcriber
+        if self.streaming_transcriber:
+            try:
+                self.streaming_transcriber.stop()
+            except Exception:
+                pass
+            self.streaming_transcriber = None
+
+        # Stop keyboard listener
+        if self.keyboard_listener:
+            try:
+                self.keyboard_listener.stop()
+            except Exception:
+                pass
+            self.keyboard_listener = None
+
+        # Stop UI timer
+        if hasattr(self, 'ui_timer') and self.ui_timer:
+            try:
+                self.ui_timer.stop()
+            except Exception:
+                pass
+
+        print("Cleanup complete.")
+
     def run(self):
         """Start the app with keyboard listener."""
         # Start keyboard listener in background
@@ -876,16 +994,36 @@ class WispyApp(rumps.App):
 
 def main():
     """Main entry point."""
+    global _app_instance
+
     print("Wispy - Voice to Text")
     print("=" * 50)
     print()
+
+    # Check for single instance
+    if not acquire_single_instance_lock():
+        print("Error: Wispy is already running.")
+        print("Check your menu bar or use Activity Monitor to quit the existing instance.")
+        sys.exit(1)
+
+    # Register cleanup handlers
+    atexit.register(release_single_instance_lock)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
     print("Note: You may need to grant Accessibility and Microphone permissions")
     print("in System Settings > Privacy & Security")
     print()
     print("Starting menu bar app...")
 
-    app = WispyApp()
-    app.run()
+    try:
+        app = WispyApp()
+        _app_instance = app
+        app.run()
+    finally:
+        if _app_instance:
+            _app_instance.cleanup()
+        release_single_instance_lock()
 
 
 if __name__ == "__main__":

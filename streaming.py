@@ -2,6 +2,7 @@
 
 import tempfile
 import os
+import time
 import threading
 from queue import Queue, Empty
 from dataclasses import dataclass
@@ -17,6 +18,10 @@ from vad import SileroVAD
 _parakeet_model = None
 
 SAMPLE_RATE = 16000
+
+# Safety limits
+MAX_QUEUE_SIZE = 50  # Max pending transcription segments
+QUEUE_JOIN_TIMEOUT = 10.0  # Max seconds to wait for queue to drain
 
 
 @dataclass
@@ -72,8 +77,8 @@ class StreamingTranscriber:
         self.overlap_buffer: Optional[np.ndarray] = None
         self.last_transcription = ""
 
-        # Background transcription
-        self.transcription_queue: Queue = Queue()
+        # Background transcription (maxsize prevents memory exhaustion)
+        self.transcription_queue: Queue = Queue(maxsize=MAX_QUEUE_SIZE)
         self.transcription_thread: Optional[threading.Thread] = None
         self.running = False
         self.lock = threading.Lock()
@@ -156,8 +161,16 @@ class StreamingTranscriber:
             else:
                 self.overlap_buffer = audio_data.copy()
 
-            self.transcription_queue.put((audio_with_context, self.total_samples, self.last_transcription))
-            self.on_status("Transcribing...")
+            try:
+                # Use timeout to prevent blocking forever if queue is full
+                self.transcription_queue.put(
+                    (audio_with_context, self.total_samples, self.last_transcription),
+                    timeout=1.0
+                )
+                self.on_status("Transcribing...")
+            except Exception:
+                # Queue full - skip this segment to prevent blocking
+                print("Warning: Transcription queue full, skipping segment")
 
         self.current_audio = []
         self.current_audio_samples = 0
@@ -248,18 +261,34 @@ class StreamingTranscriber:
                 # Add overlap context for final segment
                 if self.overlap_buffer is not None:
                     audio_data = np.concatenate([self.overlap_buffer, audio_data], axis=0)
-                self.transcription_queue.put((audio_data, self.total_samples, self.last_transcription))
+                try:
+                    self.transcription_queue.put(
+                        (audio_data, self.total_samples, self.last_transcription),
+                        timeout=1.0
+                    )
+                except Exception:
+                    print("Warning: Could not queue final segment")
 
         self.speech_active = False
         self.current_audio = []
 
-        # Wait for transcription queue to drain
-        self.transcription_queue.join()
+        # Signal worker to stop (do this before join to allow worker to exit)
+        self.running = False
+
+        # Wait for transcription queue to drain with timeout
+        # Use a polling approach since Queue.join() doesn't support timeout
+        deadline = time.time() + QUEUE_JOIN_TIMEOUT
+        while not self.transcription_queue.empty() and time.time() < deadline:
+            time.sleep(0.1)
+
+        if not self.transcription_queue.empty():
+            print(f"Warning: Transcription queue not fully drained, {self.transcription_queue.qsize()} items remaining")
 
         # Stop the worker thread
-        self.running = False
         if self.transcription_thread:
-            self.transcription_thread.join(timeout=1.0)
+            self.transcription_thread.join(timeout=2.0)
+            if self.transcription_thread.is_alive():
+                print("Warning: Transcription thread did not stop cleanly")
 
         # Clean up VAD
         self.vad.stop()

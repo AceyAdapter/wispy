@@ -30,7 +30,7 @@ Wispy runs entirely on your Mac — no cloud services, no API keys, no data leav
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/wispy.git
+git clone https://github.com/aceyadapter/wispy.git
 cd wispy
 
 # Create virtual environment

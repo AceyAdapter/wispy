@@ -13,6 +13,9 @@ import mlx_whisper
 
 from vad import SileroVAD
 
+# Will be set by wispy.py when using Parakeet
+_parakeet_model = None
+
 SAMPLE_RATE = 16000
 
 
@@ -33,17 +36,20 @@ class StreamingTranscriber:
     and returned when stop() is called.
     """
 
-    def __init__(self, model_repo: str, on_status: Optional[Callable[[str], None]] = None,
+    def __init__(self, model_repo: str, engine: str = "whisper",
+                 on_status: Optional[Callable[[str], None]] = None,
                  on_segment: Optional[Callable[[str], None]] = None):
         """
         Initialize streaming transcriber.
 
         Args:
             model_repo: HuggingFace repo for MLX Whisper model
+            engine: "whisper" or "parakeet"
             on_status: Optional callback for status updates
             on_segment: Optional callback when a segment is transcribed (for real-time pasting)
         """
         self.model_repo = model_repo
+        self.engine = engine
         self.on_status = on_status or (lambda s: None)
         self.on_segment = on_segment or (lambda s: None)
 
@@ -57,7 +63,7 @@ class StreamingTranscriber:
         self.total_samples = 0
 
         # Max segment duration (transcribe even without pause)
-        self.max_segment_seconds = 3
+        self.max_segment_seconds = 2
         self.max_segment_samples = int(SAMPLE_RATE * self.max_segment_seconds)
 
         # Overlap for context (prepend to each chunk)
@@ -197,8 +203,13 @@ class StreamingTranscriber:
 
             try:
                 wavfile.write(temp_path, SAMPLE_RATE, audio_int16)
-                result = mlx_whisper.transcribe(temp_path, path_or_hf_repo=self.model_repo)
-                text = result["text"].strip()
+
+                if self.engine == "parakeet" and _parakeet_model is not None:
+                    result = _parakeet_model.transcribe(temp_path)
+                    text = result.text.strip()
+                else:
+                    result = mlx_whisper.transcribe(temp_path, path_or_hf_repo=self.model_repo)
+                    text = result["text"].strip()
 
                 # Strip overlapping words from previous chunk
                 text = self._strip_overlap_words(text, prev_transcription)

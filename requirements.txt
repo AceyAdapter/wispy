@@ -3,6 +3,7 @@ sounddevice
 numpy
 scipy
 mlx-whisper
+parakeet-mlx
 pyperclip
 rumps
 huggingface_hub

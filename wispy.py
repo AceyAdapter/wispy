@@ -3,6 +3,7 @@
 
 import tempfile
 import os
+import json
 import threading
 import time
 from pathlib import Path
@@ -16,60 +17,319 @@ from pynput import keyboard
 from pynput.keyboard import Controller, Key
 import mlx_whisper
 import rumps
-from huggingface_hub import scan_cache_dir
+from huggingface_hub import scan_cache_dir, snapshot_download
+from huggingface_hub.utils import disable_progress_bars
+from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 
+import streaming
 from streaming import StreamingTranscriber
 
-# Track loaded model to avoid redundant loads
-_loaded_model_repo = None
+# Config file path
+CONFIG_PATH = Path.home() / ".config" / "wispy" / "config.json"
 
+# Default hotkey configuration
+DEFAULT_HOTKEYS = {
+    "hold_key": "ctrl_r",        # Hold to record, release to transcribe
+    "toggle_modifier": "alt_l",  # Modifier for toggle mode (+ Space)
+}
 
-def preload_model(model_repo: str, on_status=None):
-    """Pre-load a model by running a dummy transcription."""
-    global _loaded_model_repo
+# Map of key names to pynput Key objects
+KEY_MAP = {
+    "ctrl_r": keyboard.Key.ctrl_r,
+    "ctrl_l": keyboard.Key.ctrl_l,
+    "alt_r": keyboard.Key.alt_r,
+    "alt_l": keyboard.Key.alt_l,
+    "cmd_r": keyboard.Key.cmd_r,
+    "cmd_l": keyboard.Key.cmd_l,
+    "shift_r": keyboard.Key.shift_r,
+    "shift_l": keyboard.Key.shift_l,
+    "space": keyboard.Key.space,
+    "tab": keyboard.Key.tab,
+    "caps_lock": keyboard.Key.caps_lock,
+    "f1": keyboard.Key.f1,
+    "f2": keyboard.Key.f2,
+    "f3": keyboard.Key.f3,
+    "f4": keyboard.Key.f4,
+    "f5": keyboard.Key.f5,
+    "f6": keyboard.Key.f6,
+    "f7": keyboard.Key.f7,
+    "f8": keyboard.Key.f8,
+    "f9": keyboard.Key.f9,
+    "f10": keyboard.Key.f10,
+    "f11": keyboard.Key.f11,
+    "f12": keyboard.Key.f12,
+}
 
-    if _loaded_model_repo == model_repo:
-        print(f"Model already loaded: {model_repo}")
-        return
-
-    if on_status:
-        on_status(f"Loading model...", "⏳")
-
-    print(f"Pre-loading model: {model_repo}")
-
-    # Create a short silent audio file to trigger model load
-    silent_audio = np.zeros(SAMPLE_RATE, dtype=np.int16)  # 1 second of silence
-    fd, temp_path = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
-
-    try:
-        wavfile.write(temp_path, SAMPLE_RATE, silent_audio)
-        mlx_whisper.transcribe(temp_path, path_or_hf_repo=model_repo)
-        _loaded_model_repo = model_repo
-        print(f"Model loaded: {model_repo}")
-        if on_status:
-            on_status("Ready - Hold Right Ctrl to record", "🎤")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        if on_status:
-            on_status(f"Error loading model", "❌")
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+# Display names for keys
+KEY_DISPLAY = {
+    "ctrl_r": "Right Control",
+    "ctrl_l": "Left Control",
+    "alt_r": "Right Option",
+    "alt_l": "Left Option",
+    "cmd_r": "Right Command",
+    "cmd_l": "Left Command",
+    "shift_r": "Right Shift",
+    "shift_l": "Left Shift",
+    "space": "Space",
+    "tab": "Tab",
+    "caps_lock": "Caps Lock",
+    "f1": "F1", "f2": "F2", "f3": "F3", "f4": "F4",
+    "f5": "F5", "f6": "F6", "f7": "F7", "f8": "F8",
+    "f9": "F9", "f10": "F10", "f11": "F11", "f12": "F12",
+}
 
 # Configuration
 SAMPLE_RATE = 16000  # Whisper's native sample rate
 CHANNELS = 1
 
-# Available MLX Whisper models (repo, display name, approximate size)
-MODELS = [
+# Available engines
+ENGINES = ["whisper", "parakeet"]
+DEFAULT_ENGINE = "whisper"
+
+# Available models per engine (repo, display name, approximate size)
+WHISPER_MODELS = [
     ("mlx-community/whisper-tiny-mlx", "Tiny", "~75 MB"),
     ("mlx-community/whisper-base-mlx", "Base", "~140 MB"),
     ("mlx-community/whisper-small-mlx", "Small", "~460 MB"),
     ("mlx-community/whisper-medium-mlx", "Medium", "~1.5 GB"),
     ("mlx-community/whisper-large-v3-mlx", "Large v3", "~3 GB"),
 ]
-DEFAULT_MODEL = "mlx-community/whisper-base-mlx"
+
+PARAKEET_MODELS = [
+    ("mlx-community/parakeet-tdt-0.6b-v2", "Parakeet 0.6B v2", "~2.5 GB"),
+]
+
+DEFAULT_MODELS = {
+    "whisper": "mlx-community/whisper-base-mlx",
+    "parakeet": "mlx-community/parakeet-tdt-0.6b-v2",
+}
+
+
+def load_config():
+    """Load configuration from file, returning defaults if not found."""
+    config = {
+        "hotkeys": DEFAULT_HOTKEYS.copy(),
+        "engine": DEFAULT_ENGINE,
+        "model": None,  # Will use DEFAULT_MODELS[engine] if None
+    }
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                saved = json.load(f)
+                # Load hotkeys
+                saved_hotkeys = saved.get("hotkeys", {})
+                valid = {k: saved_hotkeys[k] for k in DEFAULT_HOTKEYS if k in saved_hotkeys}
+                config["hotkeys"] = {**DEFAULT_HOTKEYS, **valid}
+                # Load engine and model
+                if "engine" in saved and saved["engine"] in ENGINES:
+                    config["engine"] = saved["engine"]
+                if "model" in saved:
+                    config["model"] = saved["model"]
+        except Exception as e:
+            print(f"Error loading config: {e}")
+    return config
+
+
+def save_config(config):
+    """Save configuration to file."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"Error saving config: {e}")
+
+
+def key_matches(pressed_key, key_name):
+    """Check if a pressed key matches a configured key name."""
+    # Check special keys
+    if key_name in KEY_MAP:
+        return pressed_key == KEY_MAP[key_name]
+    # Check character keys (stored as "char_x")
+    if key_name.startswith("char_") and hasattr(pressed_key, 'char'):
+        return pressed_key.char == key_name[5:]
+    return False
+
+
+# Track loaded model to avoid redundant loads
+_loaded_model_repo = None
+_loaded_engine = None
+_parakeet_model = None
+_model_operation_in_progress = False  # Prevent concurrent model operations
+
+
+def _is_model_downloaded(model_repo: str) -> bool:
+    """Check if a model is already downloaded."""
+    try:
+        cache_info = scan_cache_dir()
+        return model_repo in {repo.repo_id for repo in cache_info.repos}
+    except Exception:
+        return False
+
+
+class ProgressTracker:
+    """Track download progress across multiple files."""
+    def __init__(self, on_status):
+        self.on_status = on_status
+        self.total_bytes = 0
+        self.downloaded_bytes = 0
+        self.last_update = 0
+        self.current_file_size = 0
+        self.current_file_downloaded = 0
+
+    def update(self, n):
+        """Called by tqdm with number of bytes downloaded."""
+        self.current_file_downloaded += n
+        self.downloaded_bytes += n
+        now = time.time()
+        if now - self.last_update > 0.3:  # Update every 300ms
+            self._show_progress()
+            self.last_update = now
+
+    def _show_progress(self):
+        if self.on_status and self.total_bytes > 0:
+            total_mb = self.total_bytes / (1024 * 1024)
+            if total_mb >= 1000:
+                self.on_status(f"Downloading ({total_mb/1024:.1f} GB)", "⬇️")
+            else:
+                self.on_status(f"Downloading ({total_mb:.0f} MB)", "⬇️")
+
+    def file_start(self, size):
+        """Called when starting a new file."""
+        self.current_file_size = size
+        self.current_file_downloaded = 0
+
+    def file_done(self):
+        """Called when a file is done."""
+        pass
+
+
+def _download_model_with_progress(model_repo: str, on_status=None):
+    """Download a model with progress updates."""
+    from huggingface_hub import HfApi, hf_hub_download
+    from huggingface_hub.utils import enable_progress_bars
+
+    if on_status:
+        on_status("Checking download...", "⬇️")
+
+    # Get list of files and total size
+    api = HfApi()
+    try:
+        repo_info = api.repo_info(model_repo, files_metadata=True)
+        files = repo_info.siblings or []
+        total_size = sum(f.size or 0 for f in files)
+    except Exception:
+        total_size = 0
+        files = []
+
+    tracker = ProgressTracker(on_status)
+    tracker.total_bytes = total_size
+
+    if on_status and total_size > 0:
+        total_mb = total_size / (1024 * 1024)
+        if total_mb >= 1000:
+            on_status(f"Downloading ({total_mb/1024:.1f} GB)", "⬇️")
+        else:
+            on_status(f"Downloading ({total_mb:.0f} MB)", "⬇️")
+
+    # Download with progress tracking using tqdm override
+    import tqdm as tqdm_module
+    original_tqdm = tqdm_module.tqdm
+
+    class ProgressTqdm(original_tqdm):
+        def __init__(self, *args, **kwargs):
+            kwargs['disable'] = False  # Enable so we get updates
+            super().__init__(*args, **kwargs)
+            if hasattr(self, 'total') and self.total:
+                tracker.file_start(self.total)
+
+        def update(self, n=1):
+            super().update(n)
+            tracker.update(n)
+
+        def close(self):
+            super().close()
+            tracker.file_done()
+
+    # Temporarily replace tqdm
+    tqdm_module.tqdm = ProgressTqdm
+    enable_progress_bars()
+
+    try:
+        snapshot_download(model_repo)
+    finally:
+        # Restore original tqdm
+        tqdm_module.tqdm = original_tqdm
+        disable_progress_bars()
+
+
+def preload_model(model_repo: str, engine: str = "whisper", on_status=None, on_complete=None):
+    """Pre-load a model by running a dummy transcription."""
+    global _loaded_model_repo, _loaded_engine, _parakeet_model, _model_operation_in_progress
+
+    if _loaded_model_repo == model_repo and _loaded_engine == engine:
+        print(f"Model already loaded: {model_repo}")
+        if on_complete:
+            on_complete()
+        return
+
+    # Prevent concurrent operations
+    if _model_operation_in_progress:
+        print("Model operation already in progress, skipping")
+        return
+
+    _model_operation_in_progress = True
+
+    try:
+        # Check if model needs to be downloaded
+        needs_download = not _is_model_downloaded(model_repo)
+        if needs_download:
+            if on_status:
+                on_status("Downloading...", "⬇️")
+            print(f"Downloading model: {model_repo}")
+            _download_model_with_progress(model_repo, on_status)
+
+        if on_status:
+            on_status("Loading model...", "⏳")
+
+        print(f"Pre-loading model: {model_repo} (engine: {engine})")
+
+        if engine == "parakeet":
+            # Load Parakeet model
+            _parakeet_model = parakeet_from_pretrained(model_repo)
+            _loaded_model_repo = model_repo
+            _loaded_engine = engine
+            print(f"Model loaded: {model_repo}")
+            if on_status:
+                on_status("Ready", "🎤")
+        else:
+            # Load Whisper model with dummy transcription
+            silent_audio = np.zeros(SAMPLE_RATE, dtype=np.int16)
+            fd, temp_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+
+            try:
+                wavfile.write(temp_path, SAMPLE_RATE, silent_audio)
+                mlx_whisper.transcribe(temp_path, path_or_hf_repo=model_repo)
+                _loaded_model_repo = model_repo
+                _loaded_engine = engine
+                print(f"Model loaded: {model_repo}")
+                if on_status:
+                    on_status("Ready", "🎤")
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+        # Notify completion (to refresh menu icons)
+        if on_complete:
+            on_complete()
+
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        if on_status:
+            on_status("Error loading model", "❌")
+    finally:
+        _model_operation_in_progress = False
 
 
 class WispyApp(rumps.App):
@@ -88,7 +348,22 @@ class WispyApp(rumps.App):
         self.keyboard_listener = None
         self.ui_queue = Queue()
         self.lock = threading.Lock()
-        self.model_repo = DEFAULT_MODEL
+
+        # Load configuration
+        self.config = load_config()
+        self.hotkeys = self.config["hotkeys"]
+
+        # Engine and model selection
+        self.engine = self.config["engine"]
+        # Use saved model if valid for current engine, otherwise use default
+        saved_model = self.config.get("model")
+        valid_repos = [m[0] for m in (WHISPER_MODELS if self.engine == "whisper" else PARAKEET_MODELS)]
+        if saved_model and saved_model in valid_repos:
+            self.model_repo = saved_model
+        else:
+            self.model_repo = DEFAULT_MODELS[self.engine]
+        self.modifier_pressed = False  # Track toggle modifier key state
+        self.capturing_hotkey = None   # Which hotkey we're capturing (None if not capturing)
 
         # Streaming mode state
         self.streaming_mode = False
@@ -105,12 +380,16 @@ class WispyApp(rumps.App):
             self.selected_device = self.input_devices[0]
 
         # Build menu
-        self.status_item = rumps.MenuItem("Ready - Hold Right Ctrl to record")
+        self.status_item = rumps.MenuItem("Ready")
         self.status_item.set_callback(None)
 
         # Device submenu
         self.device_menu = rumps.MenuItem("Microphone")
         self._build_device_menu()
+
+        # Engine submenu
+        self.engine_menu = rumps.MenuItem("Engine")
+        self._build_engine_menu()
 
         # Model submenu
         self.model_menu = rumps.MenuItem("Model")
@@ -123,11 +402,17 @@ class WispyApp(rumps.App):
         )
         self.streaming_toggle.state = self.streaming_mode
 
+        # Hotkeys submenu
+        self.hotkeys_menu = rumps.MenuItem("Hotkeys")
+        self._build_hotkeys_menu()
+
         self.menu = [
             self.status_item,
             None,  # Separator
             self.device_menu,
+            self.engine_menu,
             self.model_menu,
+            self.hotkeys_menu,
             self.streaming_toggle,
             None,  # Separator
         ]
@@ -161,11 +446,86 @@ class WispyApp(rumps.App):
         except Exception:
             return set()
 
+    def _save_config(self):
+        """Save current configuration to file."""
+        self.config["hotkeys"] = self.hotkeys
+        self.config["engine"] = self.engine
+        self.config["model"] = self.model_repo
+        save_config(self.config)
+
+    def _build_engine_menu(self):
+        """Build the engine selection submenu."""
+        engine_names = {
+            "whisper": "Whisper (99+ languages)",
+            "parakeet": "Parakeet (English, 30x faster)",
+        }
+        for engine in ENGINES:
+            label = engine_names.get(engine, engine)
+            item = rumps.MenuItem(label, callback=self._select_engine)
+            item.engine_id = engine
+            item.state = (engine == self.engine)
+            self.engine_menu[label] = item
+
+    def _select_engine(self, sender):
+        """Handle engine selection from menu."""
+        # Prevent switching while download/load in progress
+        if _model_operation_in_progress:
+            rumps.notification("Wispy", "Please wait", "Model operation in progress")
+            return
+
+        new_engine = sender.engine_id
+
+        # Already selected
+        if new_engine == self.engine:
+            return
+
+        # Check if switching to Parakeet and model not downloaded
+        if new_engine == "parakeet":
+            downloaded = self._get_downloaded_models()
+            parakeet_repo = DEFAULT_MODELS["parakeet"]
+            if parakeet_repo not in downloaded:
+                # Show warning dialog
+                response = rumps.alert(
+                    title="Download Required",
+                    message="Parakeet requires downloading ~2.5 GB. Continue?",
+                    ok="Download",
+                    cancel="Cancel"
+                )
+                if response != 1:  # User cancelled
+                    return
+
+        self.engine = new_engine
+        self.model_repo = DEFAULT_MODELS[self.engine]
+        self._save_config()
+
+        # Update engine checkmarks
+        for item in self.engine_menu.values():
+            if hasattr(item, 'engine_id'):
+                item.state = (item.engine_id == self.engine)
+
+        # Rebuild model menu for new engine
+        self._build_model_menu()
+
+        engine_name = "Whisper" if self.engine == "whisper" else "Parakeet"
+        rumps.notification("Wispy", "Engine changed", f"Using {engine_name}")
+        print(f"Engine changed: {engine_name}")
+
+        # Load default model for new engine
+        def load():
+            preload_model(self.model_repo, self.engine, on_status=self.set_status, on_complete=self._build_model_menu)
+
+        threading.Thread(target=load, daemon=True).start()
+
     def _build_model_menu(self):
         """Build the model selection submenu."""
-        downloaded = self._get_downloaded_models()
+        # Clear existing items
+        if hasattr(self.model_menu, '_menu') and self.model_menu._menu:
+            self.model_menu.clear()
 
-        for repo, name, size in MODELS:
+        downloaded = self._get_downloaded_models()
+        models = WHISPER_MODELS if self.engine == "whisper" else PARAKEET_MODELS
+
+        for repo, name, size in models:
             is_downloaded = repo in downloaded
             status = "✓" if is_downloaded else f"↓ {size}"
             label = f"{name} ({status})"
@@ -178,7 +538,13 @@ class WispyApp(rumps.App):
 
     def _select_model(self, sender):
         """Handle model selection from menu."""
+        # Prevent switching while download/load in progress
+        if _model_operation_in_progress:
+            rumps.notification("Wispy", "Please wait", "Model operation in progress")
+            return
+
         self.model_repo = sender.model_repo
+        self._save_config()
 
         # Update checkmarks
         for item in self.model_menu.values():
@@ -189,7 +555,7 @@ class WispyApp(rumps.App):
 
         # Load model in background thread
         def load():
-            preload_model(self.model_repo, on_status=self.set_status)
+            preload_model(self.model_repo, self.engine, on_status=self.set_status, on_complete=self._build_model_menu)
             rumps.notification("Wispy", "Model ready", sender.model_name)
 
         threading.Thread(target=load, daemon=True).start()
@@ -201,6 +567,70 @@ class WispyApp(rumps.App):
         mode = "Streaming" if self.streaming_mode else "Standard"
         rumps.notification("Wispy", "Mode changed", f"{mode} mode enabled")
         print(f"Mode changed: {mode}")
+
+    def _build_hotkeys_menu(self):
+        """Build the hotkeys configuration submenu."""
+        # Clear existing items (only if menu is initialized)
+        if hasattr(self.hotkeys_menu, '_menu') and self.hotkeys_menu._menu:
+            self.hotkeys_menu.clear()
+
+        # Hold key
+        hold_display = KEY_DISPLAY.get(self.hotkeys["hold_key"], self.hotkeys["hold_key"])
+        hold_item = rumps.MenuItem(
+            f"Hold to Record: {hold_display}",
+            callback=self._configure_hold_key
+        )
+        self.hotkeys_menu["hold"] = hold_item
+
+        # Toggle modifier (always paired with Space)
+        mod_display = KEY_DISPLAY.get(self.hotkeys["toggle_modifier"], self.hotkeys["toggle_modifier"])
+        mod_item = rumps.MenuItem(
+            f"Toggle: {mod_display} + Space",
+            callback=self._configure_toggle_modifier
+        )
+        self.hotkeys_menu["modifier"] = mod_item
+
+    def _configure_hold_key(self, sender):
+        """Start capturing the hold-to-record key."""
+        self.capturing_hotkey = "hold_key"
+        self.set_status("Press new Hold key...", "⌨️")
+        rumps.notification("Wispy", "Configure Hotkey", "Press the key to use for hold-to-record")
+
+    def _configure_toggle_modifier(self, sender):
+        """Start capturing the toggle modifier key."""
+        self.capturing_hotkey = "toggle_modifier"
+        self.set_status("Press new Modifier...", "⌨️")
+        rumps.notification("Wispy", "Configure Hotkey", "Press the modifier key for toggle mode")
+
+    def _capture_key(self, key):
+        """Capture a key press for hotkey configuration."""
+        # Get the key name - check special keys first
+        key_name = None
+        for name, k in KEY_MAP.items():
+            if key == k:
+                key_name = name
+                break
+
+        # Check for character keys (letters, numbers, etc.)
+        if key_name is None and hasattr(key, 'char') and key.char:
+            key_name = f"char_{key.char}"
+
+        if key_name is None:
+            self.set_status("Unsupported key, try again", "❌")
+            return False
+
+        # Update the hotkey
+        self.hotkeys[self.capturing_hotkey] = key_name
+        self._save_config()
+        self._build_hotkeys_menu()
+
+        key_display = KEY_DISPLAY.get(key_name, key_name.replace("char_", "").upper())
+        self.set_status(f"Set to: {key_display}", "✅")
+        rumps.notification("Wispy", "Hotkey Updated", f"Set to {key_display}")
+
+        self.capturing_hotkey = None
+        threading.Timer(1.5, lambda: self.set_status("Ready", "🎤")).start()
+        return True
 
     def _select_device(self, sender):
         """Handle device selection from menu."""
@@ -258,8 +688,13 @@ class WispyApp(rumps.App):
 
             # Initialize streaming transcriber if in streaming mode
             if self.streaming_mode:
+                # Set Parakeet model reference for streaming module
+                if self.engine == "parakeet":
+                    streaming._parakeet_model = _parakeet_model
+
                 self.streaming_transcriber = StreamingTranscriber(
                     model_repo=self.model_repo,
+                    engine=self.engine,
                     on_status=lambda s: self.set_status(s, "🔴"),
                     on_segment=self._paste_segment
                 )
@@ -316,7 +751,7 @@ class WispyApp(rumps.App):
                 transcriber.stop()
             self.streaming_transcriber = None
             self.processing = False
-            self.set_status("Ready - Hold Right Ctrl to record", "🎤")
+            self.set_status("Ready", "🎤")
             return
 
         try:
@@ -329,7 +764,7 @@ class WispyApp(rumps.App):
                 # Don't paste again - segments were pasted in real-time
                 self.set_status("Done", "✅")
                 self.processing = False
-                threading.Timer(2.0, lambda: self.set_status("Ready - Hold Right Ctrl to record", "🎤")).start()
+                threading.Timer(2.0, lambda: self.set_status("Ready", "🎤")).start()
                 return
             else:
                 # Standard mode: batch transcribe
@@ -342,8 +777,17 @@ class WispyApp(rumps.App):
                 wavfile.write(temp_path, SAMPLE_RATE, audio_int16)
 
                 try:
-                    result = mlx_whisper.transcribe(temp_path, path_or_hf_repo=self.model_repo)
-                    text = result["text"].strip()
+                    if self.engine == "parakeet":
+                        # Use Parakeet for transcription
+                        global _parakeet_model
+                        if _parakeet_model is None:
+                            _parakeet_model = parakeet_from_pretrained(self.model_repo)
+                        result = _parakeet_model.transcribe(temp_path)
+                        text = result.text.strip()
+                    else:
+                        # Use Whisper for transcription
+                        result = mlx_whisper.transcribe(temp_path, path_or_hf_repo=self.model_repo)
+                        text = result["text"].strip()
                 finally:
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
@@ -364,12 +808,28 @@ class WispyApp(rumps.App):
         finally:
             self.processing = False
             # Reset status after delay (set_status is already thread-safe)
-            threading.Timer(2.0, lambda: self.set_status("Ready - Hold Right Ctrl to record", "🎤")).start()
+            threading.Timer(2.0, lambda: self.set_status("Ready", "🎤")).start()
 
     def on_press(self, key):
         """Handle key press events."""
         try:
-            if key == keyboard.Key.ctrl_r:
+            # If we're capturing a hotkey, handle that first
+            if self.capturing_hotkey:
+                self._capture_key(key)
+                return
+
+            # Track toggle modifier key state
+            if key_matches(key, self.hotkeys["toggle_modifier"]):
+                self.modifier_pressed = True
+            # Toggle recording on modifier + Space
+            elif key == keyboard.Key.space and self.modifier_pressed:
+                if not self.recording:
+                    self.start_recording()
+                else:
+                    # Process in a thread to not block
+                    threading.Thread(target=self.process_recording, daemon=True).start()
+            # Hold key to record
+            elif key_matches(key, self.hotkeys["hold_key"]):
                 self.start_recording()
         except AttributeError:
             pass
@@ -377,8 +837,10 @@ class WispyApp(rumps.App):
     def on_release(self, key):
         """Handle key release events."""
         try:
-            if key == keyboard.Key.ctrl_r:
-                # Process in a thread to not block
+            if key_matches(key, self.hotkeys["toggle_modifier"]):
+                self.modifier_pressed = False
+            # Release hold key to stop and transcribe
+            elif key_matches(key, self.hotkeys["hold_key"]):
                 threading.Thread(target=self.process_recording, daemon=True).start()
         except AttributeError:
             pass
@@ -403,8 +865,8 @@ class WispyApp(rumps.App):
 
         # Pre-load model in background
         def startup_load():
-            preload_model(self.model_repo, on_status=self.set_status)
-            print("Ready! Hold Right Control key to record, release to transcribe and paste.")
+            preload_model(self.model_repo, self.engine, on_status=self.set_status, on_complete=self._build_model_menu)
+            print("Ready! Hold Right Ctrl or press Left Option+Space to record.")
 
         threading.Thread(target=startup_load, daemon=True).start()
 

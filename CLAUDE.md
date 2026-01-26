@@ -43,7 +43,7 @@ Multi-file Python application with event-driven architecture:
 - **Text output**: `pyperclip` for clipboard operations
 
 ### Recording Modes
-1. **Hold mode**: Hold Right Control (default) to record, release to transcribe
+1. **Hold mode**: Hold Right Option (default) to record, release to transcribe
 2. **Toggle mode**: Left Option + Space to start/stop recording
 3. **Streaming mode**: Real-time transcription with VAD-based segmentation
 
@@ -59,7 +59,7 @@ Key press → Start recording → (VAD segments in streaming mode) → Key relea
 ## Configuration
 
 Config stored at `~/.config/wispy/config.json`:
-- `hotkeys.hold_key` - Key for hold-to-record (default: `ctrl_r`)
+- `hotkeys.hold_key` - Key for hold-to-record (default: `alt_r`)
 - `hotkeys.toggle_modifier` - Modifier for toggle mode (default: `alt_l`)
 - `engine` - Transcription engine: `whisper` or `parakeet`
 - `model` - HuggingFace model repo for selected engine

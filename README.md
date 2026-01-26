@@ -13,7 +13,7 @@ Wispy runs entirely on your Mac — no cloud services, no API keys, no data leav
 - **Menu Bar App** — Lives in your menu bar, always ready
 - **Configurable Hotkeys** — Customize your recording shortcuts
 - **Multiple Recording Modes**:
-  - Hold-to-record (default: Right Control)
+  - Hold-to-record (default: Right Option)
   - Toggle mode (default: Left Option + Space)
   - Streaming mode with real-time transcription
 - **Multiple Model Sizes** — From Tiny (~75MB) to Large (~3GB), choose your speed/accuracy tradeoff
@@ -56,7 +56,7 @@ pyinstaller wispy.spec
 
 1. **Launch Wispy** — A microphone icon appears in your menu bar
 2. **Grant Permissions** — Allow Microphone and Accessibility access when prompted
-3. **Record** — Hold Right Control and speak (or use Left Option + Space to toggle)
+3. **Record** — Hold Right Option and speak (or use Left Option + Space to toggle)
 4. **Done** — Release the key and your transcription is automatically pasted
 
 ### Menu Bar Options

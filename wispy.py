@@ -16,6 +16,7 @@ import signal
 import atexit
 import fcntl
 import subprocess
+import warnings
 from pathlib import Path
 from queue import Queue
 
@@ -37,6 +38,62 @@ from streaming import StreamingTranscriber
 # macOS Accessibility check using pyobjc (safer than ctypes)
 import objc
 from Foundation import NSDictionary
+
+
+def safe_notification(title, subtitle, message):
+    """Show notification, gracefully handling missing Info.plist when running from source."""
+    try:
+        rumps.notification(title, subtitle, message)
+    except RuntimeError:
+        # Running from source without bundled app - just log to console
+        print(f"[{title}] {subtitle}: {message}")
+
+
+def check_microphone_permissions():
+    """
+    Check and request microphone permissions.
+    Returns True if granted, False otherwise.
+    """
+    try:
+        from AVFoundation import (
+            AVCaptureDevice,
+            AVMediaTypeAudio,
+            AVAuthorizationStatusAuthorized,
+            AVAuthorizationStatusNotDetermined,
+            AVAuthorizationStatusDenied,
+            AVAuthorizationStatusRestricted,
+        )
+
+        status = AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio)
+
+        if status == AVAuthorizationStatusAuthorized:
+            return True
+        elif status == AVAuthorizationStatusNotDetermined:
+            # Request permission - this triggers the system dialog
+            import threading
+            granted = [None]
+            event = threading.Event()
+
+            def handler(granted_):
+                granted[0] = granted_
+                event.set()
+
+            AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+                AVMediaTypeAudio, handler
+            )
+            event.wait(timeout=30)
+            return granted[0] or False
+        else:
+            # Denied or Restricted
+            print("Microphone permission denied or restricted.")
+            print("Enable in System Settings > Privacy & Security > Microphone")
+            return False
+    except ImportError as e:
+        print(f"Warning: Could not import AVFoundation for mic check: {e}")
+        return True  # Assume OK, will fail later if not
+    except Exception as e:
+        print(f"Could not check microphone permissions: {e}")
+        return True  # Assume OK, will fail later if not
 
 
 def check_accessibility_permissions():
@@ -85,7 +142,7 @@ CONFIG_PATH = Path.home() / ".config" / "wispy" / "config.json"
 
 # Default hotkey configuration
 DEFAULT_HOTKEYS = {
-    "hold_key": "ctrl_r",        # Hold to record, release to transcribe
+    "hold_key": "alt_r",         # Hold to record, release to transcribe
     "toggle_modifier": "alt_l",  # Modifier for toggle mode (+ Space)
 }
 
@@ -163,6 +220,15 @@ DEFAULT_MODELS = {
     "whisper": "mlx-community/whisper-base-mlx",
     "parakeet": "mlx-community/parakeet-tdt-0.6b-v2",
 }
+
+
+def get_clipboard_contents():
+    """Safely get clipboard contents, returning None if not text or empty."""
+    try:
+        contents = pyperclip.paste()
+        return contents if contents else None
+    except Exception:
+        return None
 
 
 def load_config():
@@ -244,6 +310,8 @@ _app_instance = None
 
 def _signal_handler(signum, frame):
     """Handle termination signals for graceful shutdown."""
+    # Suppress multiprocessing resource tracker warnings during shutdown
+    warnings.filterwarnings("ignore", "resource_tracker:")
     print(f"\nReceived signal {signum}, shutting down...")
     if _app_instance:
         _app_instance.cleanup()
@@ -480,6 +548,9 @@ class WispyApp(rumps.App):
         self.streaming_mode = False
         self.streaming_transcriber = None
 
+        # Saved clipboard for restoration after pasting transcription
+        self.saved_clipboard = None
+
         # Get available devices
         self.input_devices = self._get_input_devices()
 
@@ -581,7 +652,7 @@ class WispyApp(rumps.App):
         """Handle engine selection from menu."""
         # Prevent switching while download/load in progress
         if _model_operation_in_progress:
-            rumps.notification("Wispy", "Please wait", "Model operation in progress")
+            safe_notification("Wispy", "Please wait", "Model operation in progress")
             return
 
         new_engine = sender.engine_id
@@ -618,7 +689,7 @@ class WispyApp(rumps.App):
         self._build_model_menu()
 
         engine_name = "Whisper" if self.engine == "whisper" else "Parakeet"
-        rumps.notification("Wispy", "Engine changed", f"Using {engine_name}")
+        safe_notification("Wispy", "Engine changed", f"Using {engine_name}")
         print(f"Engine changed: {engine_name}")
 
         # Load default model for new engine
@@ -651,7 +722,7 @@ class WispyApp(rumps.App):
         """Handle model selection from menu."""
         # Prevent switching while download/load in progress
         if _model_operation_in_progress:
-            rumps.notification("Wispy", "Please wait", "Model operation in progress")
+            safe_notification("Wispy", "Please wait", "Model operation in progress")
             return
 
         self.model_repo = sender.model_repo
@@ -667,7 +738,7 @@ class WispyApp(rumps.App):
         # Load model in background thread
         def load():
             preload_model(self.model_repo, self.engine, on_status=self.set_status, on_complete=self._build_model_menu)
-            rumps.notification("Wispy", "Model ready", sender.model_name)
+            safe_notification("Wispy", "Model ready", sender.model_name)
 
         threading.Thread(target=load, daemon=True).start()
 
@@ -676,7 +747,7 @@ class WispyApp(rumps.App):
         self.streaming_mode = not self.streaming_mode
         sender.state = self.streaming_mode
         mode = "Streaming" if self.streaming_mode else "Standard"
-        rumps.notification("Wispy", "Mode changed", f"{mode} mode enabled")
+        safe_notification("Wispy", "Mode changed", f"{mode} mode enabled")
         print(f"Mode changed: {mode}")
 
     def _build_hotkeys_menu(self):
@@ -705,13 +776,13 @@ class WispyApp(rumps.App):
         """Start capturing the hold-to-record key."""
         self.capturing_hotkey = "hold_key"
         self.set_status("Press new Hold key...", "⌨️")
-        rumps.notification("Wispy", "Configure Hotkey", "Press the key to use for hold-to-record")
+        safe_notification("Wispy", "Configure Hotkey", "Press the key to use for hold-to-record")
 
     def _configure_toggle_modifier(self, sender):
         """Start capturing the toggle modifier key."""
         self.capturing_hotkey = "toggle_modifier"
         self.set_status("Press new Modifier...", "⌨️")
-        rumps.notification("Wispy", "Configure Hotkey", "Press the modifier key for toggle mode")
+        safe_notification("Wispy", "Configure Hotkey", "Press the modifier key for toggle mode")
 
     def _capture_key(self, key):
         """Capture a key press for hotkey configuration."""
@@ -737,7 +808,7 @@ class WispyApp(rumps.App):
 
         key_display = KEY_DISPLAY.get(key_name, key_name.replace("char_", "").upper())
         self.set_status(f"Set to: {key_display}", "✅")
-        rumps.notification("Wispy", "Hotkey Updated", f"Set to {key_display}")
+        safe_notification("Wispy", "Hotkey Updated", f"Set to {key_display}")
 
         self.capturing_hotkey = None
         threading.Timer(1.5, lambda: self.set_status("Ready", "🎤")).start()
@@ -752,12 +823,22 @@ class WispyApp(rumps.App):
                 item.state = (item.device_id == self.selected_device)
 
         device_name = sd.query_devices(self.selected_device)['name']
-        rumps.notification("Wispy", "Microphone changed", device_name)
+        safe_notification("Wispy", "Microphone changed", device_name)
 
     def set_status(self, status, icon=None):
         """Update status display (thread-safe via queue)."""
         print(status)
         self.ui_queue.put((status, icon))
+
+    def _restore_clipboard(self):
+        """Restore the saved clipboard contents after pasting transcription."""
+        if self.saved_clipboard is not None:
+            time.sleep(0.1)  # Small delay to ensure paste completes
+            try:
+                pyperclip.copy(self.saved_clipboard)
+            except Exception:
+                pass  # Ignore errors restoring clipboard
+        self.saved_clipboard = None
 
     def _paste_segment(self, text):
         """Paste a transcribed segment immediately (called from background thread)."""
@@ -802,6 +883,9 @@ class WispyApp(rumps.App):
         with self.lock:
             if self.recording or self.processing or self.selected_device is None:
                 return
+
+            # Save clipboard contents before we overwrite it with transcription
+            self.saved_clipboard = get_clipboard_contents()
 
             self.set_status("Recording...", "🔴")
             self.audio_chunks = []
@@ -872,6 +956,7 @@ class WispyApp(rumps.App):
                 transcriber.stop()
             self.streaming_transcriber = None
             self.processing = False
+            self._restore_clipboard()  # Restore clipboard even if no audio
             self.set_status("Ready", "🎤")
             return
 
@@ -883,6 +968,7 @@ class WispyApp(rumps.App):
                 transcriber.stop()  # This will paste remaining via on_segment callback
                 self.streaming_transcriber = None
                 # Don't paste again - segments were pasted in real-time
+                self._restore_clipboard()  # Restore original clipboard contents
                 self.set_status("Done", "✅")
                 self.processing = False
                 threading.Timer(2.0, lambda: self.set_status("Ready", "🎤")).start()
@@ -927,6 +1013,7 @@ class WispyApp(rumps.App):
         except Exception as e:
             self.set_status(f"Error: {str(e)[:30]}", "❌")
         finally:
+            self._restore_clipboard()  # Restore original clipboard contents
             self.processing = False
             # Reset status after delay (set_status is already thread-safe)
             threading.Timer(2.0, lambda: self.set_status("Ready", "🎤")).start()
@@ -969,6 +1056,8 @@ class WispyApp(rumps.App):
 
     def cleanup(self):
         """Clean up resources before shutdown."""
+        # Suppress multiprocessing resource tracker warnings during shutdown
+        warnings.filterwarnings("ignore", "resource_tracker:")
         print("Cleaning up...")
 
         # Stop any ongoing recording
@@ -1027,7 +1116,7 @@ class WispyApp(rumps.App):
         # Pre-load model in background
         def startup_load():
             preload_model(self.model_repo, self.engine, on_status=self.set_status, on_complete=self._build_model_menu)
-            print("Ready! Hold Right Ctrl or press Left Option+Space to record.")
+            print("Ready! Hold Right Option or press Left Option+Space to record.")
 
         threading.Thread(target=startup_load, daemon=True).start()
 
@@ -1054,16 +1143,31 @@ def main():
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # Check Accessibility permissions (required for paste simulation)
-    if not check_accessibility_permissions():
+    # Check all permissions upfront on first run
+    print("Checking permissions...")
+    print()
+
+    mic_ok = check_microphone_permissions()
+    acc_ok = check_accessibility_permissions()
+
+    if not mic_ok or not acc_ok:
         print()
-        print("⚠️  Accessibility permissions required for paste functionality.")
-        print("   After enabling, restart Wispy.")
+        print("=" * 50)
+        print("PERMISSIONS REQUIRED")
+        print("=" * 50)
+        if not mic_ok:
+            print("❌ Microphone: System Settings > Privacy & Security > Microphone")
+        if not acc_ok:
+            print("❌ Accessibility: System Settings > Privacy & Security > Accessibility")
+        print()
+        print("After granting permissions, restart Wispy.")
+        print("=" * 50)
+        print()
+    else:
+        print("✅ Microphone permission granted")
+        print("✅ Accessibility permission granted")
         print()
 
-    print("Note: You may also need to grant Microphone permissions")
-    print("in System Settings > Privacy & Security > Microphone")
-    print()
     print("Starting menu bar app...")
 
     try:
@@ -1071,6 +1175,8 @@ def main():
         _app_instance = app
         app.run()
     finally:
+        # Suppress multiprocessing resource tracker warnings during shutdown
+        warnings.filterwarnings("ignore", "resource_tracker:")
         if _app_instance:
             _app_instance.cleanup()
         release_single_instance_lock()

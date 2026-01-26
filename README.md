@@ -2,7 +2,7 @@
 
 A lightweight, local voice-to-text application for macOS, optimized for Apple Silicon.
 
-Wispy runs entirely on your Mac — no cloud services, no API keys, no data leaves your device. Just press a hotkey, speak, and your transcribed text is automatically pasted into any application.
+Wispy runs entirely on your Mac — no cloud services, no API keys, no data leaves your device. Just press a hotkey, speak, and your transcribed text is automatically pasted into any application. Can be used with any available local model.
 
 ## Features
 
@@ -21,8 +21,9 @@ Wispy runs entirely on your Mac — no cloud services, no API keys, no data leav
 ## Requirements
 
 - macOS 12.0 or later
-- Apple Silicon Mac (M1/M2/M3/M4)
+- Apple Silicon Mac (M-series)
 - Python 3.10+ (for running from source)
+- ffmpeg
 
 ## Installation
 
@@ -42,14 +43,6 @@ pip install -r requirements.txt
 
 # Run
 python3 wispy.py
-```
-
-### Build Standalone App
-
-```bash
-pip install pyinstaller
-pyinstaller wispy.spec
-# The app will be at dist/Wispy.app
 ```
 
 ## Usage

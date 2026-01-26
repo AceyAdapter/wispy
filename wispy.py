@@ -569,11 +569,7 @@ class WispyApp(rumps.App):
         self.device_menu = rumps.MenuItem("Microphone")
         self._build_device_menu()
 
-        # Engine submenu
-        self.engine_menu = rumps.MenuItem("Engine")
-        self._build_engine_menu()
-
-        # Model submenu
+        # Model submenu (includes both Whisper and Parakeet models)
         self.model_menu = rumps.MenuItem("Model")
         self._build_model_menu()
 
@@ -592,7 +588,6 @@ class WispyApp(rumps.App):
             self.status_item,
             None,  # Separator
             self.device_menu,
-            self.engine_menu,
             self.model_menu,
             self.hotkeys_menu,
             self.streaming_toggle,
@@ -635,79 +630,21 @@ class WispyApp(rumps.App):
         self.config["model"] = self.model_repo
         save_config(self.config)
 
-    def _build_engine_menu(self):
-        """Build the engine selection submenu."""
-        engine_names = {
-            "whisper": "Whisper (99+ languages)",
-            "parakeet": "Parakeet (English, 30x faster)",
-        }
-        for engine in ENGINES:
-            label = engine_names.get(engine, engine)
-            item = rumps.MenuItem(label, callback=self._select_engine)
-            item.engine_id = engine
-            item.state = (engine == self.engine)
-            self.engine_menu[label] = item
-
-    def _select_engine(self, sender):
-        """Handle engine selection from menu."""
-        # Prevent switching while download/load in progress
-        if _model_operation_in_progress:
-            safe_notification("Wispy", "Please wait", "Model operation in progress")
-            return
-
-        new_engine = sender.engine_id
-
-        # Already selected
-        if new_engine == self.engine:
-            return
-
-        # Check if switching to Parakeet and model not downloaded
-        if new_engine == "parakeet":
-            downloaded = self._get_downloaded_models()
-            parakeet_repo = DEFAULT_MODELS["parakeet"]
-            if parakeet_repo not in downloaded:
-                # Show warning dialog
-                response = rumps.alert(
-                    title="Download Required",
-                    message="Parakeet requires downloading ~2.5 GB. Continue?",
-                    ok="Download",
-                    cancel="Cancel"
-                )
-                if response != 1:  # User cancelled
-                    return
-
-        self.engine = new_engine
-        self.model_repo = DEFAULT_MODELS[self.engine]
-        self._save_config()
-
-        # Update engine checkmarks
-        for item in self.engine_menu.values():
-            if hasattr(item, 'engine_id'):
-                item.state = (item.engine_id == self.engine)
-
-        # Rebuild model menu for new engine
-        self._build_model_menu()
-
-        engine_name = "Whisper" if self.engine == "whisper" else "Parakeet"
-        safe_notification("Wispy", "Engine changed", f"Using {engine_name}")
-        print(f"Engine changed: {engine_name}")
-
-        # Load default model for new engine
-        def load():
-            preload_model(self.model_repo, self.engine, on_status=self.set_status, on_complete=self._build_model_menu)
-
-        threading.Thread(target=load, daemon=True).start()
-
     def _build_model_menu(self):
-        """Build the model selection submenu."""
+        """Build the model selection submenu with Whisper and Parakeet sections."""
         # Clear existing items
         if hasattr(self.model_menu, '_menu') and self.model_menu._menu:
             self.model_menu.clear()
 
         downloaded = self._get_downloaded_models()
-        models = WHISPER_MODELS if self.engine == "whisper" else PARAKEET_MODELS
 
-        for repo, name, size in models:
+        # Whisper section header
+        whisper_header = rumps.MenuItem("── Whisper (99+ languages) ──")
+        whisper_header.set_callback(None)
+        self.model_menu["whisper_header"] = whisper_header
+
+        # Whisper models
+        for repo, name, size in WHISPER_MODELS:
             is_downloaded = repo in downloaded
             status = "✓" if is_downloaded else f"↓ {size}"
             label = f"{name} ({status})"
@@ -715,8 +652,27 @@ class WispyApp(rumps.App):
             item = rumps.MenuItem(label, callback=self._select_model)
             item.model_repo = repo
             item.model_name = name
+            item.model_engine = "whisper"
             item.state = (repo == self.model_repo)
-            self.model_menu[label] = item
+            self.model_menu[f"whisper_{repo}"] = item
+
+        # Parakeet section header
+        parakeet_header = rumps.MenuItem("── Parakeet (English, 30x faster) ──")
+        parakeet_header.set_callback(None)
+        self.model_menu["parakeet_header"] = parakeet_header
+
+        # Parakeet models
+        for repo, name, size in PARAKEET_MODELS:
+            is_downloaded = repo in downloaded
+            status = "✓" if is_downloaded else f"↓ {size}"
+            label = f"{name} ({status})"
+
+            item = rumps.MenuItem(label, callback=self._select_model)
+            item.model_repo = repo
+            item.model_name = name
+            item.model_engine = "parakeet"
+            item.state = (repo == self.model_repo)
+            self.model_menu[f"parakeet_{repo}"] = item
 
     def _select_model(self, sender):
         """Handle model selection from menu."""
@@ -725,7 +681,40 @@ class WispyApp(rumps.App):
             safe_notification("Wispy", "Please wait", "Model operation in progress")
             return
 
-        self.model_repo = sender.model_repo
+        new_engine = sender.model_engine
+        new_repo = sender.model_repo
+        model_name = sender.model_name
+
+        # Check if model needs to be downloaded
+        downloaded = self._get_downloaded_models()
+        needs_download = new_repo not in downloaded
+
+        # Show confirmation dialog if download required
+        if needs_download:
+            # Get size from model lists
+            size = "unknown"
+            all_models = WHISPER_MODELS + PARAKEET_MODELS
+            for repo, name, sz in all_models:
+                if repo == new_repo:
+                    size = sz
+                    break
+
+            response = rumps.alert(
+                title="Download Required",
+                message=f"{model_name} requires downloading {size}. Continue?",
+                ok="Download",
+                cancel="Cancel"
+            )
+            if response != 1:  # User cancelled
+                return
+
+        # Update engine if changed
+        if new_engine != self.engine:
+            self.engine = new_engine
+            engine_name = "Whisper" if self.engine == "whisper" else "Parakeet"
+            print(f"Engine changed: {engine_name}")
+
+        self.model_repo = new_repo
         self._save_config()
 
         # Update checkmarks
@@ -733,12 +722,12 @@ class WispyApp(rumps.App):
             if hasattr(item, 'model_repo'):
                 item.state = (item.model_repo == self.model_repo)
 
-        print(f"Model changed: {sender.model_name} ({sender.model_repo})")
+        print(f"Model changed: {model_name} ({new_repo})")
 
         # Load model in background thread
         def load():
             preload_model(self.model_repo, self.engine, on_status=self.set_status, on_complete=self._build_model_menu)
-            safe_notification("Wispy", "Model ready", sender.model_name)
+            safe_notification("Wispy", "Model ready", model_name)
 
         threading.Thread(target=load, daemon=True).start()
 

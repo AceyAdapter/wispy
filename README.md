@@ -113,6 +113,13 @@ Settings are stored at `~/.config/wispy/config.json` and can be changed via the 
 **Transcription is slow**
 - Try a smaller model (Tiny or Base) or switch to Parakeet for English
 
+**ffmpeg not found / audio processing error**
+- MLX-Whisper requires ffmpeg for audio processing. Install it via Homebrew:
+  ```bash
+  brew install ffmpeg
+  ```
+- After installing, run the application again with `python3 wispy.py`
+
 ## Privacy
 
 Wispy processes all audio locally on your Mac. No audio or transcriptions are sent to any external servers. The only network requests are to Hugging Face to download models on first use.

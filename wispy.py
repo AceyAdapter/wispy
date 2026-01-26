@@ -34,9 +34,9 @@ from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 import streaming
 from streaming import StreamingTranscriber
 
-# macOS Accessibility check using ctypes (no extra dependencies)
-import ctypes
-import ctypes.util
+# macOS Accessibility check using pyobjc (safer than ctypes)
+import objc
+from Foundation import NSDictionary
 
 
 def check_accessibility_permissions():
@@ -46,54 +46,24 @@ def check_accessibility_permissions():
     Returns True if permissions are granted, False otherwise.
     """
     try:
-        # Load the ApplicationServices framework
-        app_services = ctypes.cdll.LoadLibrary(
-            ctypes.util.find_library("ApplicationServices")
-        )
-        core_foundation = ctypes.cdll.LoadLibrary(
-            ctypes.util.find_library("CoreFoundation")
-        )
-
-        # Get kCFBooleanTrue
-        core_foundation.CFRetain.argtypes = [ctypes.c_void_p]
-        core_foundation.CFRetain.restype = ctypes.c_void_p
-        kCFBooleanTrue = ctypes.c_void_p.in_dll(core_foundation, "kCFBooleanTrue")
-
-        # Create the options dictionary with prompt = true
-        core_foundation.CFDictionaryCreateMutable.argtypes = [
-            ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p
-        ]
-        core_foundation.CFDictionaryCreateMutable.restype = ctypes.c_void_p
-
-        core_foundation.CFDictionarySetValue.argtypes = [
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
-        ]
-
-        # Create CFSTR for the key
-        core_foundation.CFStringCreateWithCString.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32
-        ]
-        core_foundation.CFStringCreateWithCString.restype = ctypes.c_void_p
-
-        kCFStringEncodingUTF8 = 0x08000100
-        key = core_foundation.CFStringCreateWithCString(
-            None, b"AXTrustedCheckOptionPrompt", kCFStringEncodingUTF8
+        # Load the HIServices framework where AXIsProcessTrustedWithOptions lives
+        HIServices = objc.loadBundle(
+            'HIServices',
+            {},
+            '/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework'
         )
 
-        # Create dictionary and set the prompt option
-        options = core_foundation.CFDictionaryCreateMutable(None, 1, None, None)
-        core_foundation.CFDictionarySetValue(options, key, kCFBooleanTrue)
+        # Get the AXIsProcessTrustedWithOptions function
+        functions = [('AXIsProcessTrustedWithOptions', b'Z@')]
+        objc.loadBundleFunctions(HIServices, globals(), functions)
 
-        # Call AXIsProcessTrustedWithOptions
-        app_services.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-        app_services.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+        # Create options dict to prompt user for permissions
+        options = NSDictionary.dictionaryWithObject_forKey_(
+            True, 'AXTrustedCheckOptionPrompt'
+        )
 
-        trusted = app_services.AXIsProcessTrustedWithOptions(options)
-
-        # Clean up
-        core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
-        core_foundation.CFRelease(options)
-        core_foundation.CFRelease(key)
+        # Call the function
+        trusted = AXIsProcessTrustedWithOptions(options)
 
         if not trusted:
             print("Accessibility permissions not granted.")

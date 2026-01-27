@@ -9,7 +9,7 @@ Wispy runs entirely on your Mac — no cloud services, no API keys, no data leav
 - **100% Local** — All transcription happens on-device using Apple Silicon's Neural Engine
 - **Two Transcription Engines**:
   - **MLX-Whisper** — OpenAI's Whisper optimized for Apple Silicon, supports 99+ languages
-  - **Parakeet** — NVIDIA's Parakeet model via MLX, English-only but ~30x faster
+  - **Parakeet** — NVIDIA's Parakeet model via MLX, ~30x faster (v2: English-only, v3: 25 languages)
 - **Menu Bar App** — Lives in your menu bar, always ready
 - **Configurable Hotkeys** — Customize your recording shortcuts
 - **Multiple Recording Modes**:
@@ -17,6 +17,7 @@ Wispy runs entirely on your Mac — no cloud services, no API keys, no data leav
   - Toggle mode (default: Left Option + Space)
   - Streaming mode with real-time transcription
 - **Multiple Model Sizes** — From Tiny (~75MB) to Large (~3GB), choose your speed/accuracy tradeoff
+- **Clipboard Preservation** — Your clipboard contents are automatically restored after pasting
 
 ## Requirements
 
@@ -54,11 +55,11 @@ python3 wispy.py
 
 ### Menu Bar Options
 
-- **Microphone** — Select your input device
+- **Microphone** — Select your input device (auto-detects when devices plug/unplug)
 - **Engine** — Switch between Whisper and Parakeet
 - **Model** — Choose model size (downloads automatically on first use)
 - **Hotkeys** — Customize your recording shortcuts
-- **Streaming Mode** — Enable real-time transcription
+- **Experimental** — Access experimental features like Streaming Mode
 
 ## Models
 
@@ -71,10 +72,11 @@ python3 wispy.py
 | Medium | ~1.5 GB | High accuracy |
 | Large v3 | ~3 GB | Best accuracy |
 
-### Parakeet (English only)
+### Parakeet
 | Model | Size | Use Case |
 |-------|------|----------|
 | Parakeet 0.6B v2 | ~2.5 GB | Very fast, English-only |
+| Parakeet 0.6B v3 | ~2.5 GB | Very fast, 25 languages |
 
 Models are downloaded from Hugging Face on first use and cached locally.
 

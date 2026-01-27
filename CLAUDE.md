@@ -16,11 +16,6 @@ pip install -r requirements.txt
 
 # Run the application
 python3 wispy.py
-
-# Build standalone app
-pip install pyinstaller
-pyinstaller wispy.spec
-# Output: dist/Wispy.app
 ```
 
 ## Architecture
@@ -31,30 +26,35 @@ Multi-file Python application with event-driven architecture:
 - `wispy.py` - Main application, menu bar UI (rumps), hotkey handling, transcription orchestration
 - `streaming.py` - Real-time streaming transcription with VAD-triggered segments
 - `vad.py` - Voice Activity Detection using WebRTC VAD
-- `runtime_hook.py` - PyInstaller hook for multiprocessing support
 
 ### Key Components
 - **Menu bar app**: `rumps` for macOS menu bar integration (LSUIElement)
 - **Audio capture**: `sounddevice` with callback-based streaming, 16kHz mono
 - **Transcription engines**:
   - MLX-Whisper (99+ languages, multiple model sizes)
-  - Parakeet MLX (English only, ~30x faster)
+  - Parakeet MLX (v2: English only, v3: 25 languages, ~30x faster than Whisper)
 - **Keyboard control**: `pynput` for global hotkey listening and Cmd+V simulation
-- **Text output**: `pyperclip` for clipboard operations
+- **Text output**: `pyperclip` for clipboard operations with automatic preservation/restoration
 
 ### Recording Modes
 1. **Hold mode**: Hold Right Option (default) to record, release to transcribe
 2. **Toggle mode**: Left Option + Space to start/stop recording
-3. **Streaming mode**: Real-time transcription with VAD-based segmentation
+3. **Streaming mode**: Real-time transcription with VAD-based segmentation (under Experimental menu)
 
 ### Flow
-Key press → Start recording → (VAD segments in streaming mode) → Key release → Stop recording → Save temp WAV → Transcribe → Copy to clipboard → Simulate Cmd+V → Cleanup
+Key press → Start recording → (VAD segments in streaming mode) → Key release → Stop recording → Save temp WAV → Transcribe → Copy to clipboard → Simulate Cmd+V → Restore original clipboard → Cleanup
 
 ### Safety Features
 - Single-instance lock prevents multiple app launches
-- 5-minute max recording duration prevents memory exhaustion
+- 5-minute max recording duration with auto-stop prevents memory exhaustion
+- Queue size limits (50 segments max) in streaming mode
 - Graceful shutdown with signal handlers and resource cleanup
-- Multiprocessing freeze_support() for PyInstaller compatibility
+- Thread-safe UI updates with locks
+
+### Additional Features
+- **Device auto-detection**: Automatically refreshes device list and switches when devices plug/unplug
+- **Model download progress**: Real-time download status shown in menu bar
+- **Clipboard preservation**: Original clipboard contents restored after pasting transcription
 
 ## Configuration
 
@@ -63,6 +63,12 @@ Config stored at `~/.config/wispy/config.json`:
 - `hotkeys.toggle_modifier` - Modifier for toggle mode (default: `alt_l`)
 - `engine` - Transcription engine: `whisper` or `parakeet`
 - `model` - HuggingFace model repo for selected engine
+
+### Supported Hotkey Values
+- Modifier keys: `ctrl_l`, `ctrl_r`, `alt_l`, `alt_r`, `cmd_l`, `cmd_r`, `shift_l`, `shift_r`
+- Function keys: `f1` through `f12`
+- Special keys: `space`, `tab`, `caps_lock`
+- Character keys: Dynamically assignable via interactive configuration
 
 ## macOS Permissions Required
 

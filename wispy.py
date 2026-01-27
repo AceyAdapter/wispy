@@ -34,6 +34,8 @@ from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 
 import streaming
 from streaming import StreamingTranscriber
+import llm_processor
+from llm_processor import LLM_MODELS, DEFAULT_LLM_MODEL
 
 # macOS Accessibility check using pyobjc (safer than ctypes)
 import objc
@@ -238,6 +240,8 @@ def load_config():
         "hotkeys": DEFAULT_HOTKEYS.copy(),
         "engine": DEFAULT_ENGINE,
         "model": None,  # Will use DEFAULT_MODELS[engine] if None
+        "llm_enabled": False,
+        "llm_model": DEFAULT_LLM_MODEL,
     }
     if CONFIG_PATH.exists():
         try:
@@ -252,6 +256,11 @@ def load_config():
                     config["engine"] = saved["engine"]
                 if "model" in saved:
                     config["model"] = saved["model"]
+                # Load LLM settings
+                if "llm_enabled" in saved:
+                    config["llm_enabled"] = saved["llm_enabled"]
+                if "llm_model" in saved:
+                    config["llm_model"] = saved["llm_model"]
         except Exception as e:
             print(f"Error loading config: {e}")
     return config
@@ -528,6 +537,8 @@ class WispyApp(rumps.App):
         self.keyboard_listener = None
         self.ui_queue = Queue()
         self.lock = threading.Lock()
+        self.chunks_lock = threading.Lock()  # Separate lock for audio chunks
+        self.recorded_samples = 0
 
         # Load configuration
         self.config = load_config()
@@ -548,6 +559,10 @@ class WispyApp(rumps.App):
         # Streaming mode state
         self.streaming_mode = False
         self.streaming_transcriber = None
+
+        # LLM post-processing state
+        self.llm_enabled = self.config.get("llm_enabled", False)
+        self.llm_model = self.config.get("llm_model", DEFAULT_LLM_MODEL)
 
         # Saved clipboard for restoration after pasting transcription
         self.saved_clipboard = None
@@ -735,6 +750,8 @@ class WispyApp(rumps.App):
         self.config["hotkeys"] = self.hotkeys
         self.config["engine"] = self.engine
         self.config["model"] = self.model_repo
+        self.config["llm_enabled"] = self.llm_enabled
+        self.config["llm_model"] = self.llm_model
         save_config(self.config)
 
     def _build_model_menu(self):
@@ -859,6 +876,99 @@ class WispyApp(rumps.App):
         self.streaming_toggle.state = self.streaming_mode
         self.experimental_menu["streaming"] = self.streaming_toggle
 
+        # Separator
+        self.experimental_menu["sep1"] = None
+
+        # LLM post-processing header
+        llm_header = rumps.MenuItem("── LLM Text Cleanup ──")
+        llm_header.set_callback(None)
+        self.experimental_menu["llm_header"] = llm_header
+
+        # LLM toggle
+        self.llm_toggle = rumps.MenuItem(
+            "Enable LLM Cleanup",
+            callback=self._toggle_llm
+        )
+        self.llm_toggle.state = self.llm_enabled
+        self.experimental_menu["llm_toggle"] = self.llm_toggle
+
+        # LLM model selection
+        downloaded = self._get_downloaded_models()
+        for repo, name, size in LLM_MODELS:
+            is_downloaded = repo in downloaded
+            status = "✓" if is_downloaded else f"↓ {size}"
+            label = f"  {name} ({status})"
+
+            item = rumps.MenuItem(label, callback=self._select_llm_model)
+            item.llm_repo = repo
+            item.llm_name = name
+            item.state = (repo == self.llm_model)
+            self.experimental_menu[f"llm_{repo}"] = item
+
+    def _toggle_llm(self, sender):
+        """Toggle LLM post-processing."""
+        self.llm_enabled = not self.llm_enabled
+        sender.state = self.llm_enabled
+        self._save_config()
+
+        status = "enabled" if self.llm_enabled else "disabled"
+        safe_notification("Wispy", "LLM Cleanup", f"Text cleanup {status}")
+        print(f"LLM cleanup: {status}")
+
+        # Preload LLM model if enabled
+        if self.llm_enabled:
+            def load():
+                llm_processor.load_llm(self.llm_model, on_status=self.set_status)
+                self._build_experimental_menu()
+            threading.Thread(target=load, daemon=True).start()
+
+    def _select_llm_model(self, sender):
+        """Handle LLM model selection."""
+        if _model_operation_in_progress:
+            safe_notification("Wispy", "Please wait", "Model operation in progress")
+            return
+
+        new_repo = sender.llm_repo
+        model_name = sender.llm_name
+
+        # Check if download required
+        downloaded = self._get_downloaded_models()
+        needs_download = new_repo not in downloaded
+
+        if needs_download:
+            size = "unknown"
+            for repo, name, sz in LLM_MODELS:
+                if repo == new_repo:
+                    size = sz
+                    break
+
+            response = rumps.alert(
+                title="Download Required",
+                message=f"{model_name} requires downloading {size}. Continue?",
+                ok="Download",
+                cancel="Cancel"
+            )
+            if response != 1:
+                return
+
+        self.llm_model = new_repo
+        self._save_config()
+
+        # Update checkmarks
+        for item in self.experimental_menu.values():
+            if hasattr(item, 'llm_repo'):
+                item.state = (item.llm_repo == self.llm_model)
+
+        print(f"LLM model changed: {model_name}")
+
+        # Load model if LLM is enabled
+        if self.llm_enabled:
+            def load():
+                llm_processor.load_llm(self.llm_model, on_status=self.set_status)
+                self._build_experimental_menu()
+                safe_notification("Wispy", "LLM ready", model_name)
+            threading.Thread(target=load, daemon=True).start()
+
     def _build_hotkeys_menu(self):
         """Build the hotkeys configuration submenu."""
         # Clear existing items (only if menu is initialized)
@@ -973,8 +1083,7 @@ class WispyApp(rumps.App):
             print(f"Audio status: {status}")
         if self.recording:
             # Check if we've exceeded max recording duration
-            current_samples = sum(len(chunk) for chunk in self.audio_chunks)
-            if current_samples >= MAX_RECORDING_SAMPLES:
+            if self.recorded_samples >= MAX_RECORDING_SAMPLES:
                 # Auto-stop recording to prevent memory exhaustion
                 print("Warning: Max recording duration reached, auto-stopping")
                 self.recording = False
@@ -982,7 +1091,11 @@ class WispyApp(rumps.App):
                 threading.Thread(target=self.process_recording, daemon=True).start()
                 return
 
-            self.audio_chunks.append(indata.copy())
+            chunk = indata.copy()
+            with self.chunks_lock:
+                self.audio_chunks.append(chunk)
+            self.recorded_samples += len(chunk)
+
             # Feed to streaming transcriber if in streaming mode
             if self.streaming_mode and self.streaming_transcriber:
                 self.streaming_transcriber.process_audio(indata)
@@ -998,6 +1111,7 @@ class WispyApp(rumps.App):
 
             self.set_status("Recording...", "🔴")
             self.audio_chunks = []
+            self.recorded_samples = 0
             self.recording = True
 
             # Initialize streaming transcriber if in streaming mode
@@ -1040,12 +1154,16 @@ class WispyApp(rumps.App):
                 self.stream.close()
                 self.stream = None
 
-            if not self.audio_chunks:
-                self.set_status("No audio recorded", "🎤")
-                return None
+            # Small delay to ensure any in-flight callbacks complete
+            time.sleep(0.05)
 
-            audio_data = np.concatenate(self.audio_chunks, axis=0)
-            return audio_data
+            with self.chunks_lock:
+                if not self.audio_chunks:
+                    self.set_status("No audio recorded", "🎤")
+                    return None
+
+                audio_data = np.concatenate(self.audio_chunks, axis=0)
+                return audio_data
 
     def process_recording(self):
         """Stop recording, transcribe, and paste."""
@@ -1109,6 +1227,11 @@ class WispyApp(rumps.App):
                         os.remove(temp_path)
 
             if text:
+                # Apply LLM post-processing if enabled
+                if self.llm_enabled:
+                    self.set_status("Cleaning up...", "⏳")
+                    text = llm_processor.process_text(text, self.llm_model)
+
                 # Copy and paste
                 pyperclip.copy(text)
                 time.sleep(0.05)

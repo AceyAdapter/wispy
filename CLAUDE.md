@@ -26,6 +26,7 @@ Multi-file Python application with event-driven architecture:
 - `wispy.py` - Main application, menu bar UI (rumps), hotkey handling, transcription orchestration
 - `streaming.py` - Real-time streaming transcription with VAD-triggered segments
 - `vad.py` - Voice Activity Detection using WebRTC VAD
+- `llm_processor.py` - LLM post-processing for text cleanup (punctuation, filler word removal)
 
 ### Key Components
 - **Menu bar app**: `rumps` for macOS menu bar integration (LSUIElement)
@@ -33,6 +34,7 @@ Multi-file Python application with event-driven architecture:
 - **Transcription engines**:
   - MLX-Whisper (99+ languages, multiple model sizes)
   - Parakeet MLX (v2: English only, v3: 25 languages, ~30x faster than Whisper)
+- **LLM post-processing**: MLX-LM with lightweight Qwen 2.5 models for text cleanup
 - **Keyboard control**: `pynput` for global hotkey listening and Cmd+V simulation
 - **Text output**: `pyperclip` for clipboard operations with automatic preservation/restoration
 
@@ -42,7 +44,7 @@ Multi-file Python application with event-driven architecture:
 3. **Streaming mode**: Real-time transcription with VAD-based segmentation (under Experimental menu)
 
 ### Flow
-Key press → Start recording → (VAD segments in streaming mode) → Key release → Stop recording → Save temp WAV → Transcribe → Copy to clipboard → Simulate Cmd+V → Restore original clipboard → Cleanup
+Key press → Start recording → (VAD segments in streaming mode) → Key release → Stop recording → Save temp WAV → Transcribe → (LLM cleanup if enabled) → Copy to clipboard → Simulate Cmd+V → Restore original clipboard → Cleanup
 
 ### Safety Features
 - Single-instance lock prevents multiple app launches
@@ -55,6 +57,7 @@ Key press → Start recording → (VAD segments in streaming mode) → Key relea
 - **Device auto-detection**: Automatically refreshes device list and switches when devices plug/unplug
 - **Model download progress**: Real-time download status shown in menu bar
 - **Clipboard preservation**: Original clipboard contents restored after pasting transcription
+- **LLM text cleanup** (Experimental): Post-process transcriptions to fix punctuation, remove filler words (um, uh, like, you know, etc.), and correct obvious errors
 
 ## Configuration
 
@@ -63,6 +66,8 @@ Config stored at `~/.config/wispy/config.json`:
 - `hotkeys.toggle_modifier` - Modifier for toggle mode (default: `alt_l`)
 - `engine` - Transcription engine: `whisper` or `parakeet`
 - `model` - HuggingFace model repo for selected engine
+- `llm_enabled` - Enable LLM text cleanup (default: `false`)
+- `llm_model` - HuggingFace model repo for LLM (default: `mlx-community/Qwen2.5-0.5B-Instruct-4bit`)
 
 ### Supported Hotkey Values
 - Modifier keys: `ctrl_l`, `ctrl_r`, `alt_l`, `alt_r`, `cmd_l`, `cmd_r`, `shift_l`, `shift_r`

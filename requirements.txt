@@ -9,3 +9,4 @@ rumps
 huggingface_hub
 webrtcvad
 pyobjc-framework-AVFoundation
+mlx-lm

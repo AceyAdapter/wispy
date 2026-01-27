@@ -213,7 +213,8 @@ WHISPER_MODELS = [
 ]
 
 PARAKEET_MODELS = [
-    ("mlx-community/parakeet-tdt-0.6b-v2", "Parakeet 0.6B v2", "~2.5 GB"),
+    ("mlx-community/parakeet-tdt-0.6b-v2", "Parakeet 0.6B v2 (English)", "~2.5 GB"),
+    ("mlx-community/parakeet-tdt-0.6b-v3", "Parakeet 0.6B v3 (25 languages)", "~2.5 GB"),
 ]
 
 DEFAULT_MODELS = {
@@ -578,16 +579,13 @@ class WispyApp(rumps.App):
         self.model_menu = rumps.MenuItem("Model")
         self._build_model_menu()
 
-        # Streaming mode toggle
-        self.streaming_toggle = rumps.MenuItem(
-            "Streaming Mode",
-            callback=self._toggle_streaming_mode
-        )
-        self.streaming_toggle.state = self.streaming_mode
-
         # Hotkeys submenu
         self.hotkeys_menu = rumps.MenuItem("Hotkeys")
         self._build_hotkeys_menu()
+
+        # Experimental features submenu
+        self.experimental_menu = rumps.MenuItem("Experimental")
+        self._build_experimental_menu()
 
         self.menu = [
             self.status_item,
@@ -595,7 +593,7 @@ class WispyApp(rumps.App):
             self.device_menu,
             self.model_menu,
             self.hotkeys_menu,
-            self.streaming_toggle,
+            self.experimental_menu,
             None,  # Separator
         ]
 
@@ -766,7 +764,7 @@ class WispyApp(rumps.App):
             self.model_menu[f"whisper_{repo}"] = item
 
         # Parakeet section header
-        parakeet_header = rumps.MenuItem("── Parakeet (English, 30x faster) ──")
+        parakeet_header = rumps.MenuItem("── Parakeet (30x faster) ──")
         parakeet_header.set_callback(None)
         self.model_menu["parakeet_header"] = parakeet_header
 
@@ -847,6 +845,19 @@ class WispyApp(rumps.App):
         mode = "Streaming" if self.streaming_mode else "Standard"
         safe_notification("Wispy", "Mode changed", f"{mode} mode enabled")
         print(f"Mode changed: {mode}")
+
+    def _build_experimental_menu(self):
+        """Build the experimental features submenu."""
+        if hasattr(self.experimental_menu, '_menu') and self.experimental_menu._menu:
+            self.experimental_menu.clear()
+
+        # Streaming mode toggle
+        self.streaming_toggle = rumps.MenuItem(
+            "Streaming Mode (real-time with VAD)",
+            callback=self._toggle_streaming_mode
+        )
+        self.streaming_toggle.state = self.streaming_mode
+        self.experimental_menu["streaming"] = self.streaming_toggle
 
     def _build_hotkeys_menu(self):
         """Build the hotkeys configuration submenu."""

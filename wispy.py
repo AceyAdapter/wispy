@@ -553,13 +553,18 @@ class WispyApp(rumps.App):
 
         # Get available devices
         self.input_devices = self._get_input_devices()
+        self._device_names = self._get_device_names()  # Track names for change detection
 
-        # Set default device
+        # Set default device - track by name since indices can change
         default_input = sd.default.device[0]
         if default_input in self.input_devices:
             self.selected_device = default_input
+            self._selected_device_name = sd.query_devices(default_input)['name']
         elif self.input_devices:
             self.selected_device = self.input_devices[0]
+            self._selected_device_name = sd.query_devices(self.selected_device)['name']
+        else:
+            self._selected_device_name = None
 
         # Build menu
         self.status_item = rumps.MenuItem("Ready")
@@ -599,8 +604,106 @@ class WispyApp(rumps.App):
         devices = sd.query_devices()
         return [i for i, d in enumerate(devices) if d['max_input_channels'] > 0]
 
+    def _get_device_names(self):
+        """Get dict mapping device indices to names for change detection."""
+        devices = sd.query_devices()
+        return {i: devices[i]['name'] for i in self.input_devices}
+
+    def _refresh_devices(self, _=None):
+        """Check for device changes and update menu if needed."""
+        # Don't refresh while recording - could cause audio glitches
+        if self.recording:
+            return
+
+        try:
+            # Reinitialize PortAudio to detect new/removed devices
+            sd._terminate()
+            sd._initialize()
+
+            new_devices = self._get_input_devices()
+            new_names = {i: sd.query_devices(i)['name'] for i in new_devices}
+            default_input = sd.default.device[0]
+            default_name = sd.query_devices(default_input)['name'] if default_input in new_devices else None
+
+            # Check if device list changed (compare by names since indices can shift)
+            old_name_set = set(self._device_names.values())
+            new_name_set = set(new_names.values())
+            devices_changed = old_name_set != new_name_set
+
+            # Check if system default changed to a newly connected device
+            new_default_connected = (
+                default_name is not None and
+                default_name not in old_name_set and
+                default_name in new_name_set
+            )
+
+            if not devices_changed and not new_default_connected:
+                return  # No relevant changes
+
+            if devices_changed:
+                print(f"Audio devices changed: {old_name_set} -> {new_name_set}")
+
+            # Update stored device list
+            self.input_devices = new_devices
+            self._device_names = new_names
+
+            # If a new device was connected and is now the system default, switch to it
+            if new_default_connected:
+                self.selected_device = default_input
+                self._selected_device_name = default_name
+                print(f"New default device connected: {default_name}")
+                safe_notification("Wispy", "Microphone connected", f"Switched to {default_name}")
+                self._build_device_menu()
+                return
+
+            # Try to find the previously selected device by name
+            selected_name = self._selected_device_name
+            new_selected = None
+
+            if selected_name:
+                for idx, name in new_names.items():
+                    if name == selected_name:
+                        new_selected = idx
+                        break
+
+            if new_selected is not None:
+                # Device still exists, update index (may have changed)
+                self.selected_device = new_selected
+            else:
+                # Selected device was disconnected
+                print(f"Audio device disconnected: {selected_name}")
+
+                # Try to find new default device
+                if default_input in new_devices:
+                    self.selected_device = default_input
+                    self._selected_device_name = new_names.get(default_input, None)
+                    print(f"Switched to default device: {self._selected_device_name}")
+                    safe_notification("Wispy", "Microphone disconnected", f"Switched to {self._selected_device_name}")
+                elif new_devices:
+                    # Fall back to first available device
+                    self.selected_device = new_devices[0]
+                    self._selected_device_name = new_names.get(self.selected_device, None)
+                    print(f"Switched to: {self._selected_device_name}")
+                    safe_notification("Wispy", "Microphone disconnected", f"Switched to {self._selected_device_name}")
+                else:
+                    # No devices available
+                    self.selected_device = None
+                    self._selected_device_name = None
+                    print("No audio input devices available")
+                    safe_notification("Wispy", "No microphone", "No audio input devices available")
+
+            # Rebuild the menu
+            self._build_device_menu()
+
+        except Exception as e:
+            print(f"Error refreshing devices: {e}")
+
     def _build_device_menu(self):
         """Build the microphone selection submenu."""
+        # Clear existing items
+        if hasattr(self.device_menu, '_menu') and self.device_menu._menu:
+            self.device_menu.clear()
+
         devices = sd.query_devices()
         default_input = sd.default.device[0]
 
@@ -806,13 +909,13 @@ class WispyApp(rumps.App):
     def _select_device(self, sender):
         """Handle device selection from menu."""
         self.selected_device = sender.device_id
+        self._selected_device_name = sd.query_devices(self.selected_device)['name']
         # Update checkmarks
         for item in self.device_menu.values():
             if hasattr(item, 'device_id'):
                 item.state = (item.device_id == self.selected_device)
 
-        device_name = sd.query_devices(self.selected_device)['name']
-        safe_notification("Wispy", "Microphone changed", device_name)
+        safe_notification("Wispy", "Microphone changed", self._selected_device_name)
 
     def set_status(self, status, icon=None):
         """Update status display (thread-safe via queue)."""
@@ -1083,6 +1186,13 @@ class WispyApp(rumps.App):
             except Exception:
                 pass
 
+        # Stop device refresh timer
+        if hasattr(self, 'device_timer') and self.device_timer:
+            try:
+                self.device_timer.stop()
+            except Exception:
+                pass
+
         print("Cleanup complete.")
 
     def run(self):
@@ -1097,6 +1207,10 @@ class WispyApp(rumps.App):
         # Timer to process UI updates on main thread
         self.ui_timer = rumps.Timer(self._process_ui_queue, 0.1)
         self.ui_timer.start()
+
+        # Timer to check for device changes (every 2 seconds)
+        self.device_timer = rumps.Timer(self._refresh_devices, 2)
+        self.device_timer.start()
 
         device_name = sd.query_devices(self.selected_device)['name'] if self.selected_device else "None"
         print(f"Using microphone: {device_name}")

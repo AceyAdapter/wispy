@@ -611,11 +611,15 @@ class WispyApp(rumps.App):
 
     def _refresh_devices(self, _=None):
         """Check for device changes and update menu if needed."""
-        # Don't refresh while recording - could cause audio glitches
-        if self.recording:
+        # Try to acquire lock - if we can't, skip this refresh cycle
+        if not self.lock.acquire(blocking=False):
             return
 
         try:
+            # Don't refresh while recording or processing - could kill active streams
+            if self.recording or self.processing or self.stream is not None:
+                return
+
             # Reinitialize PortAudio to detect new/removed devices
             sd._terminate()
             sd._initialize()
@@ -697,6 +701,8 @@ class WispyApp(rumps.App):
 
         except Exception as e:
             print(f"Error refreshing devices: {e}")
+        finally:
+            self.lock.release()
 
     def _build_device_menu(self):
         """Build the microphone selection submenu."""

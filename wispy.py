@@ -1131,15 +1131,28 @@ class WispyApp(rumps.App):
             # Use smaller blocksize for streaming mode (optimizes for VAD chunks)
             blocksize = 512 if self.streaming_mode else None
 
-            self.stream = sd.InputStream(
-                device=self.selected_device,
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype=np.float32,
-                blocksize=blocksize,
-                callback=self.audio_callback
-            )
-            self.stream.start()
+            try:
+                self.stream = sd.InputStream(
+                    device=self.selected_device,
+                    samplerate=SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype=np.float32,
+                    blocksize=blocksize,
+                    callback=self.audio_callback
+                )
+                self.stream.start()
+            except sd.PortAudioError as e:
+                print(f"PortAudio error starting stream: {e}")
+                self.recording = False
+                self.stream = None
+                if self.streaming_transcriber:
+                    self.streaming_transcriber.stop()
+                    self.streaming_transcriber = None
+                self.set_status("Audio device error", "⚠️")
+                safe_notification("Wispy", "Audio Error", "Could not start recording. Check microphone.")
+                # Trigger device refresh in case device list changed
+                threading.Thread(target=self._refresh_devices, daemon=True).start()
+                return
 
     def stop_recording(self):
         """End capture and return the audio data as a numpy array."""

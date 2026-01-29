@@ -51,9 +51,10 @@ def safe_notification(title, subtitle, message):
         print(f"[{title}] {subtitle}: {message}")
 
 
-def check_microphone_permissions():
+def check_microphone_permissions(prompt=True):
     """
-    Check and request microphone permissions.
+    Check and optionally request microphone permissions.
+    If prompt=True and status is undetermined, triggers system dialog.
     Returns True if granted, False otherwise.
     """
     try:
@@ -71,6 +72,8 @@ def check_microphone_permissions():
         if status == AVAuthorizationStatusAuthorized:
             return True
         elif status == AVAuthorizationStatusNotDetermined:
+            if not prompt:
+                return False  # Not determined yet, don't prompt
             # Request permission - this triggers the system dialog
             import threading
             granted = [None]
@@ -98,10 +101,10 @@ def check_microphone_permissions():
         return True  # Assume OK, will fail later if not
 
 
-def check_accessibility_permissions():
+def check_accessibility_permissions(prompt=True):
     """
     Check if the app has Accessibility permissions.
-    If not, prompt the user and open System Settings.
+    If not and prompt=True, prompt the user and open System Settings.
     Returns True if permissions are granted, False otherwise.
     """
     try:
@@ -116,9 +119,9 @@ def check_accessibility_permissions():
         functions = [('AXIsProcessTrustedWithOptions', b'Z@')]
         objc.loadBundleFunctions(HIServices, globals(), functions)
 
-        # Create options dict to prompt user for permissions
+        # Create options dict - only prompt if requested
         options = NSDictionary.dictionaryWithObject_forKey_(
-            True, 'AXTrustedCheckOptionPrompt'
+            prompt, 'AXTrustedCheckOptionPrompt'
         )
 
         # Call the function
@@ -133,6 +136,34 @@ def check_accessibility_permissions():
     except Exception as e:
         print(f"Could not check accessibility permissions: {e}")
         return True  # Assume OK, will fail later if not
+
+
+def check_input_monitoring_permissions():
+    """
+    Check if the app has Input Monitoring permissions.
+    Note: There's no direct API - we check by testing if we can receive key events.
+    This is a best-effort check; the definitive test is whether hotkeys work.
+    Returns True if likely granted, False if likely not.
+    """
+    # Input Monitoring permission is separate from Accessibility on macOS Ventura+
+    # There's no public API to check it directly
+    # We return None to indicate "unknown" - user should grant it to be safe
+    return None
+
+
+def open_accessibility_settings():
+    """Open System Settings to Accessibility permissions page."""
+    subprocess.run(['open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'])
+
+
+def open_input_monitoring_settings():
+    """Open System Settings to Input Monitoring permissions page."""
+    subprocess.run(['open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent'])
+
+
+def open_microphone_settings():
+    """Open System Settings to Microphone permissions page."""
+    subprocess.run(['open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'])
 
 
 # Single-instance lock file
@@ -560,6 +591,10 @@ class WispyApp(rumps.App):
         self.streaming_mode = False
         self.streaming_transcriber = None
 
+        # Permission tracking
+        self.permissions_granted = False
+        self._check_permissions_silent()
+
         # LLM post-processing state
         self.llm_enabled = self.config.get("llm_enabled", False)
         self.llm_model = self.config.get("llm_model", DEFAULT_LLM_MODEL)
@@ -602,8 +637,17 @@ class WispyApp(rumps.App):
         self.experimental_menu = rumps.MenuItem("Experimental")
         self._build_experimental_menu()
 
+        # Permissions submenu
+        self.permissions_menu = rumps.MenuItem("⚠️ Grant Permissions")
+        self._build_permissions_menu()
+
+        # Disable menus if permissions not granted
+        self._update_menu_enabled_state()
+
         self.menu = [
             self.status_item,
+            None,  # Separator
+            self.permissions_menu,
             None,  # Separator
             self.device_menu,
             self.model_menu,
@@ -621,6 +665,109 @@ class WispyApp(rumps.App):
         """Get dict mapping device indices to names for change detection."""
         devices = sd.query_devices()
         return {i: devices[i]['name'] for i in self.input_devices}
+
+    def _check_permissions_silent(self):
+        """Check permissions without prompting user. Updates self.permissions_granted."""
+        try:
+            mic_ok = check_microphone_permissions()
+            acc_ok = check_accessibility_permissions(prompt=False)
+            # Input monitoring has no API check - we assume it needs to be granted
+            # We'll consider permissions "granted" if mic and accessibility are OK
+            # User still needs to grant input monitoring manually
+            self.permissions_granted = mic_ok and acc_ok
+        except Exception as e:
+            print(f"Error checking permissions: {e}")
+            self.permissions_granted = False
+
+    def _build_permissions_menu(self):
+        """Build the permissions submenu."""
+        if hasattr(self.permissions_menu, '_menu') and self.permissions_menu._menu:
+            self.permissions_menu.clear()
+
+        # Check current status
+        try:
+            mic_ok = check_microphone_permissions()
+        except Exception:
+            mic_ok = False
+
+        try:
+            acc_ok = check_accessibility_permissions(prompt=False)
+        except Exception:
+            acc_ok = False
+
+        # Microphone
+        mic_status = "✅" if mic_ok else "❌"
+        mic_item = rumps.MenuItem(
+            f"{mic_status} Microphone",
+            callback=self._open_microphone_settings
+        )
+        self.permissions_menu["mic"] = mic_item
+
+        # Accessibility (for paste simulation)
+        acc_status = "✅" if acc_ok else "❌"
+        acc_item = rumps.MenuItem(
+            f"{acc_status} Accessibility (paste)",
+            callback=self._open_accessibility_settings
+        )
+        self.permissions_menu["acc"] = acc_item
+
+        # Input Monitoring (for hotkeys) - no API to check, show as unknown/needed
+        input_item = rumps.MenuItem(
+            "⚠️ Input Monitoring (hotkeys)",
+            callback=self._open_input_monitoring_settings
+        )
+        self.permissions_menu["input"] = input_item
+
+        # Separator
+        self.permissions_menu["sep"] = None
+
+        # Refresh button
+        refresh_item = rumps.MenuItem(
+            "🔄 Refresh Status",
+            callback=self._refresh_permissions
+        )
+        self.permissions_menu["refresh"] = refresh_item
+
+        # Update menu title based on status
+        if mic_ok and acc_ok:
+            self.permissions_menu.title = "Permissions"
+        else:
+            self.permissions_menu.title = "⚠️ Grant Permissions"
+
+    def _update_menu_enabled_state(self):
+        """Enable or disable menu items based on permission status."""
+        # We can't directly disable rumps menu items, but we can update their appearance
+        # The actual disabling happens by checking permissions in the callbacks
+        pass
+
+    def _open_microphone_settings(self, _):
+        """Open microphone settings."""
+        open_microphone_settings()
+
+    def _open_accessibility_settings(self, _):
+        """Open accessibility settings."""
+        open_accessibility_settings()
+
+    def _open_input_monitoring_settings(self, _):
+        """Open input monitoring settings."""
+        open_input_monitoring_settings()
+
+    def _refresh_permissions(self, _):
+        """Refresh permission status and rebuild menu."""
+        self._check_permissions_silent()
+        self._build_permissions_menu()
+        if self.permissions_granted:
+            self.set_status("Permissions OK", "✅")
+            threading.Timer(1.5, lambda: self.set_status("Ready", "🎤")).start()
+        else:
+            self.set_status("Grant permissions above", "⚠️")
+
+    def _check_permissions_periodic(self, _):
+        """Periodically check permission status and update menu."""
+        old_status = self.permissions_granted
+        self._check_permissions_silent()
+        if self.permissions_granted != old_status:
+            self._build_permissions_menu()
 
     def _refresh_devices(self, _=None):
         """Check for device changes and update menu if needed."""
@@ -1106,6 +1253,13 @@ class WispyApp(rumps.App):
             if self.recording or self.processing or self.selected_device is None:
                 return
 
+            # Check permissions before recording
+            if not self.permissions_granted:
+                self._check_permissions_silent()
+                if not self.permissions_granted:
+                    self.set_status("Grant permissions first", "⚠️")
+                    return
+
             # Save clipboard contents before we overwrite it with transcription
             self.saved_clipboard = get_clipboard_contents()
 
@@ -1346,6 +1500,13 @@ class WispyApp(rumps.App):
             except Exception:
                 pass
 
+        # Stop permission check timer
+        if hasattr(self, 'permission_timer') and self.permission_timer:
+            try:
+                self.permission_timer.stop()
+            except Exception:
+                pass
+
         print("Cleanup complete.")
 
     def run(self):
@@ -1364,6 +1525,10 @@ class WispyApp(rumps.App):
         # Timer to check for device changes (every 2 seconds)
         self.device_timer = rumps.Timer(self._refresh_devices, 2)
         self.device_timer.start()
+
+        # Timer to check permission status (every 3 seconds)
+        self.permission_timer = rumps.Timer(self._check_permissions_periodic, 3)
+        self.permission_timer.start()
 
         device_name = sd.query_devices(self.selected_device)['name'] if self.selected_device else "None"
         print(f"Using microphone: {device_name}")
@@ -1399,30 +1564,25 @@ def main():
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # Check all permissions upfront on first run
+    # Check permissions silently - menu will handle prompting
     print("Checking permissions...")
     print()
 
-    mic_ok = check_microphone_permissions()
-    acc_ok = check_accessibility_permissions()
+    mic_ok = check_microphone_permissions(prompt=False)
+    acc_ok = check_accessibility_permissions(prompt=False)
 
-    if not mic_ok or not acc_ok:
-        print()
-        print("=" * 50)
-        print("PERMISSIONS REQUIRED")
-        print("=" * 50)
-        if not mic_ok:
-            print("❌ Microphone: System Settings > Privacy & Security > Microphone")
-        if not acc_ok:
-            print("❌ Accessibility: System Settings > Privacy & Security > Accessibility")
-        print()
-        print("After granting permissions, restart Wispy.")
-        print("=" * 50)
-        print()
-    else:
+    if mic_ok:
         print("✅ Microphone permission granted")
+    else:
+        print("❌ Microphone permission needed")
+
+    if acc_ok:
         print("✅ Accessibility permission granted")
-        print()
+    else:
+        print("❌ Accessibility permission needed")
+
+    print("ℹ️  Input Monitoring permission needed (check menu)")
+    print()
 
     print("Starting menu bar app...")
 

@@ -198,7 +198,7 @@ SAMPLE_RATE = 16000  # Whisper's native sample rate
 CHANNELS = 1
 
 # Safety limits to prevent memory exhaustion
-MAX_RECORDING_SECONDS = 300  # 5 minutes max recording
+MAX_RECORDING_SECONDS = 900  # 15 minutes max recording
 MAX_RECORDING_SAMPLES = SAMPLE_RATE * MAX_RECORDING_SECONDS
 
 # Available engines

@@ -48,7 +48,7 @@ Key press → Start recording → (VAD segments in streaming mode) → Key relea
 
 ### Safety Features
 - Single-instance lock prevents multiple app launches
-- 5-minute max recording duration with auto-stop prevents memory exhaustion
+- 15-minute max recording duration with auto-stop prevents memory exhaustion
 - Queue size limits (50 segments max) in streaming mode
 - Graceful shutdown with signal handlers and resource cleanup
 - Thread-safe UI updates with locks
